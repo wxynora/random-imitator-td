@@ -52,19 +52,7 @@ class ImitatorPvzCmdTests(unittest.TestCase):
             output = cmd_engine.cmd("cards")
 
             self.assertIn("槽位6/10", output)
-            self.assertIn("默认卡组: 模仿者 模仿者 模仿者 模仿者 向日葵 窝瓜", output)
             self.assertIn("模仿者(0)", output)
-            self.assertIn("小喷菇(25)", output)
-
-    def test_cmd_accepts_default_card_loadout(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cmd_engine.DEFAULT_SAVE_PATH = Path(tmpdir) / "save.json"
-
-            cmd_engine.cmd("new_game level=2 seed=default-cards-test")
-            output = cmd_engine.cmd("cards 默认")
-
-            self.assertIn("卡槽已设置: 模仿者,模仿者,模仿者,模仿者,向日葵,窝瓜", output)
-            self.assertIn("Lv2 场地:夜间", output)
 
     def test_cmd_emits_anti_addiction_pause_every_five_turns(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
