@@ -28,6 +28,7 @@ DEFAULT_SAVE_PATH = Path(os.environ.get("RANDOM_IMITATOR_TD_SAVE", Path.cwd() / 
 DEFAULT_CARD_LOADOUT: tuple[str, ...] = ()
 ANTI_ADDICTION_PAUSE_EVERY_TURNS = 5
 ANTI_ADDICTION_PAUSE_PREFIX = "防沉迷暂停"
+ANTI_ADDICTION_PENDING_KEY = "anti_addiction_pause_pending_turn"
 ALIASES = {
     "new": "new_game",
     "restart": "new_game",
@@ -61,7 +62,10 @@ def cmd(text: str) -> str:
 
     outputs: list[str] = []
     for part in parts[:12]:
-        outputs.append(_route_command(session, part))
+        output = _route_command(session, part)
+        outputs.append(output)
+        if output.startswith(ANTI_ADDICTION_PAUSE_PREFIX):
+            break
 
     _save_session(session)
     return "\n\n".join(output for output in outputs if output).strip()
@@ -92,6 +96,9 @@ def _route_command(session: dict[str, Any], part: str) -> str:
     engine = _engine_from_session(session)
     if engine is None:
         return _setup_text(session)
+    pause_text = _consume_anti_addiction_pause(session, engine)
+    if pause_text:
+        return pause_text
     observation = engine.run_until_decision()
     try:
         plan = parse_player_text_action_plan(
@@ -105,9 +112,7 @@ def _route_command(session: dict[str, Any], part: str) -> str:
     session["turn"] = int(session.get("turn", 0)) + 1
     _store_engine(session, engine)
     output = f"{result['observation']['player_view']['text']}\n{_state_json(engine)}"
-    pause_text = _anti_addiction_pause_text(int(session.get("turn", 0)), engine)
-    if pause_text:
-        output = f"{output}\n\n{pause_text}"
+    _mark_anti_addiction_pause_if_due(session, int(session.get("turn", 0)), engine)
     return output
 
 
@@ -166,6 +171,7 @@ def _set_cards(session: dict[str, Any], args: list[str]) -> str:
     seed = str(session.get("seed") or "RITD-001")
     engine = _new_engine(level=level, seed=seed, card_loadout=clean_loadout)
     session["turn"] = 0
+    session.pop(ANTI_ADDICTION_PENDING_KEY, None)
     session["card_loadout"] = list(clean_loadout)
     _store_engine(session, engine)
     observation = engine.run_until_decision()
@@ -241,7 +247,24 @@ def _anti_addiction_pause_text(turn: int, engine: GameEngine) -> str:
         return ""
     if engine.state.game_over:
         return ""
-    return f"{ANTI_ADDICTION_PAUSE_PREFIX}: 已完成第{turn}回合，本次先停在这里；状态已保存，下次用同一存档继续。"
+    return f"{ANTI_ADDICTION_PAUSE_PREFIX}: 由于防沉迷机制，已完成第{turn}回合后暂时中止游戏回合；状态已保存，下次用同一存档继续。"
+
+
+def _mark_anti_addiction_pause_if_due(session: dict[str, Any], turn: int, engine: GameEngine) -> None:
+    if _anti_addiction_pause_text(turn, engine):
+        session[ANTI_ADDICTION_PENDING_KEY] = turn
+
+
+def _consume_anti_addiction_pause(session: dict[str, Any], engine: GameEngine) -> str:
+    raw_turn = session.get(ANTI_ADDICTION_PENDING_KEY)
+    try:
+        turn = int(raw_turn)
+    except Exception:
+        session.pop(ANTI_ADDICTION_PENDING_KEY, None)
+        return ""
+    pause_text = _anti_addiction_pause_text(turn, engine)
+    session.pop(ANTI_ADDICTION_PENDING_KEY, None)
+    return pause_text
 
 
 def _load_or_create_session() -> dict[str, Any]:

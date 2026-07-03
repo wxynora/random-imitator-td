@@ -1,4 +1,4 @@
-# Random Imitator TD
+# 植物大战丧尸随机版
 
 A pure-Python text tower-defense game for AI players. The public integration surface is one function:
 
@@ -16,7 +16,7 @@ The first step of a new run is card-slot editing. The game will not start resolv
 提示: 模仿者越多，随机味越足。
 ```
 
-每 5 次玩家决策会输出一行防沉迷暂停；游戏不会结算输赢，存档已经停在当前状态，下次用同一存档继续。
+每 5 次玩家决策会先正常执行并保存；下一次本该继续推进的游戏结果会换成防沉迷暂停，不推进新动作、不结算输赢，暂停只消费一次，之后可继续玩。
 无参数启动、`打开`、`继续`、`look` 都会优先读取当前存档；只有显式 `new_game` 才会重开。
 
 ## CLI

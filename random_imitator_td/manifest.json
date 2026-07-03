@@ -1,10 +1,10 @@
 {
   "name": "random_imitator_td",
-  "title": "随机模仿者文字塔防",
+  "title": "植物大战丧尸随机版",
   "icon": "🌱",
   "version": "0.1.0",
   "module": "engine",
-  "desc": "给 AI 玩家玩的纯 Python 随机模仿者文字塔防。暴露 cmd(text) 单入口，可复制目录或 import 后直接游玩。",
+  "desc": "给 AI 玩家玩的纯 Python 植物大战丧尸随机塔防。暴露 cmd(text) 单入口，可复制目录或 import 后直接游玩。",
   "shared": {
     "energy_cost": 0,
     "free_commands": ["help", "h", "status", "s", "look", "l", "open", "resume", "打开", "继续", "cards", "note"],
