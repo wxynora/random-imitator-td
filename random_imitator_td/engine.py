@@ -317,12 +317,22 @@ def _session_game_over(session: dict[str, Any]) -> bool:
 
 
 def _reset_finished_session(session: dict[str, Any]) -> str:
+    engine = _engine_from_session(session)
     player_notes = _player_notes_from_session(session)
+    next_level = 1
+    seed = DEFAULT_SEED
+    prefix = "上一局已结束，已准备新局。\n请先编辑卡槽。"
+    if engine is not None and engine.state.result == "won":
+        next_level = engine.state.level + 1
+        seed = engine.rng.seed
+        prefix = f"上一关已通关，已准备 lv{next_level}。\n请先编辑卡槽。"
     session.clear()
     session.update(_fresh_session())
+    session["level"] = next_level
+    session["seed"] = seed
     if player_notes:
         session["player_notes"] = player_notes
-    return _setup_text(session, prefix="上一局已结束，已准备新局。\n请先编辑卡槽。")
+    return _setup_text(session, prefix=prefix)
 
 
 def _save_session(session: dict[str, Any]) -> None:

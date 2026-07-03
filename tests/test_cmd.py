@@ -104,6 +104,26 @@ class ImitatorPvzCmdTests(unittest.TestCase):
             self.assertIn("请先编辑卡槽", open_output)
             self.assertIn("多带模仿者", notes_output)
 
+    def test_won_game_advances_to_next_level_on_next_open(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cmd_engine.DEFAULT_SAVE_PATH = Path(tmpdir) / "save.json"
+
+            cmd_engine.cmd("new_game level=1 seed=won-next-level cards=模仿者 模仿者 向日葵 窝瓜")
+            payload = json.loads(cmd_engine.DEFAULT_SAVE_PATH.read_text(encoding="utf-8"))
+            engine = cmd_engine._engine_from_session(payload)
+            self.assertIsNotNone(engine)
+            engine.state.game_over = True
+            engine.state.result = "won"
+            cmd_engine._store_engine(payload, engine)
+            cmd_engine._save_session(payload)
+
+            open_output = cmd_engine.cmd("打开")
+            cards_output = cmd_engine.cmd("cards 模仿者 模仿者 模仿者 模仿者 向日葵 窝瓜")
+
+            self.assertIn("上一关已通关，已准备 lv2。", open_output)
+            self.assertIn("请先编辑卡槽", open_output)
+            self.assertIn("Lv2 场地:夜间", cards_output)
+
 
 if __name__ == "__main__":
     unittest.main()
