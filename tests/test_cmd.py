@@ -88,6 +88,22 @@ class ImitatorPvzCmdTests(unittest.TestCase):
             self.assertIn('"seed"', cmd_engine.DEFAULT_SAVE_PATH.read_text(encoding="utf-8"))
             self.assertNotIn("请先编辑卡槽", output)
 
+    def test_finished_game_resets_on_next_open_but_keeps_notes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cmd_engine.DEFAULT_SAVE_PATH = Path(tmpdir) / "save.json"
+
+            cmd_engine.cmd("new_game level=1 seed=finished-test cards=模仿者 模仿者 向日葵 窝瓜")
+            note_output = cmd_engine.cmd("note 多带模仿者")
+            end_output = cmd_engine.cmd("结束本局")
+            open_output = cmd_engine.cmd("打开")
+            notes_output = cmd_engine.cmd("note")
+
+            self.assertIn("复盘已记录", note_output)
+            self.assertIn("玩家主动结束本局", end_output)
+            self.assertIn("上一局已结束，已准备新局。", open_output)
+            self.assertIn("请先编辑卡槽", open_output)
+            self.assertIn("多带模仿者", notes_output)
+
 
 if __name__ == "__main__":
     unittest.main()
