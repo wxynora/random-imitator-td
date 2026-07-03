@@ -1392,6 +1392,8 @@ class GameEngine:
                 {
                     "plant_id": plant.entity_id,
                     "plant_type": plant.plant_id,
+                    "lane": plant.lane,
+                    "col": plant.col,
                     "effect": "magnet_removed_metal",
                     "zombie_id": target.entity_id,
                     "zombie_type": target.zombie_id,
@@ -1452,6 +1454,8 @@ class GameEngine:
                 {
                     "plant_id": plant.entity_id,
                     "plant_type": plant.plant_id,
+                    "lane": plant.lane,
+                    "col": plant.col,
                     "trigger_type": "spikeweed_punctured_vehicle",
                     "zombie_id": target.entity_id,
                     "zombie_type": target.zombie_id,
@@ -1684,6 +1688,8 @@ class GameEngine:
                 {
                     "plant_id": plant.entity_id,
                     "plant_type": plant.plant_id,
+                    "lane": plant.lane,
+                    "col": plant.col,
                     "trigger_type": trigger_type,
                     "zombie_id": target.entity_id,
                     "damage": damage,

@@ -6,6 +6,7 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from .game.cards import RECOMMENDED_CARD_LOADOUT
 from .game.config import GameConfig
 from .game.contracts import ContractError
 from .game.engine import GameEngine
@@ -26,7 +27,7 @@ from .game.randomizer import ReplayRng
 SAVE_VERSION = 1
 DEFAULT_SAVE_PATH = Path(os.environ.get("RANDOM_IMITATOR_TD_SAVE", Path.cwd() / "random_imitator_td_save.json"))
 DEFAULT_SEED = "RITD-001"
-DEFAULT_CARD_LOADOUT: tuple[str, ...] = ()
+DEFAULT_CARD_LOADOUT: tuple[str, ...] = RECOMMENDED_CARD_LOADOUT
 ANTI_ADDICTION_PAUSE_EVERY_TURNS = 5
 ANTI_ADDICTION_PAUSE_PREFIX = "防沉迷暂停"
 ANTI_ADDICTION_PENDING_KEY = "anti_addiction_pause_pending_turn"
@@ -185,8 +186,12 @@ def _new_game(session: dict[str, Any], args: list[str]) -> str:
 def _set_cards(session: dict[str, Any], args: list[str]) -> str:
     if not args:
         return build_card_selection_view(GameConfig(card_slot_count=6, max_card_slot_count=10))["text"]
-    loadout = tuple(_card_id(arg) for arg in args)
-    invalid = [arg for arg, card_id in zip(args, loadout) if card_id is None]
+    if len(args) == 1 and args[0].strip().lower() in {"默认", "default", "recommended"}:
+        loadout = DEFAULT_CARD_LOADOUT
+        invalid: list[str] = []
+    else:
+        loadout = tuple(_card_id(arg) for arg in args)
+        invalid = [arg for arg, card_id in zip(args, loadout) if card_id is None]
     if invalid:
         return f"未知卡牌: {', '.join(invalid)}\n\n{build_card_selection_view(GameConfig(card_slot_count=6, max_card_slot_count=10))['text']}"
     clean_loadout = tuple(card_id for card_id in loadout if card_id is not None)
@@ -265,6 +270,7 @@ def _help_text() -> str:
             "",
             "命令:",
             "  new_game level=1 seed=demo",
+            "  cards 默认",
             "  cards 模仿者 模仿者 模仿者 模仿者 向日葵 窝瓜",
             "  种 模仿者 3-4; 种 向日葵 2-3",
             "  等待 200",
@@ -504,6 +510,8 @@ def _loadout_from_options(options: dict[str, Any]) -> tuple[str, ...] | None:
     raw_cards = options.get("cards") or options.get("loadout")
     if not raw_cards:
         return None
+    if str(raw_cards).strip().lower() in {"默认", "default", "recommended"}:
+        return DEFAULT_CARD_LOADOUT
     cards = [item for item in str(raw_cards).replace(",", " ").replace("，", " ").split() if item]
     loadout = tuple(_card_id(item) for item in cards)
     if any(item is None for item in loadout):
@@ -526,7 +534,7 @@ def _card_id(name: str) -> str | None:
 
 def _loadout_text(loadout: tuple[str, ...]) -> str:
     if not loadout:
-        return "默认"
+        return "未设置"
     return ",".join(PLANT_NAMES.get(card_id, "模仿者" if card_id == "imitator" else card_id) for card_id in loadout)
 
 

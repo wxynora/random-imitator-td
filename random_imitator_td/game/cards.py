@@ -13,7 +13,7 @@ DIRECT_CARD_COSTS = {
     "cherry_bomb": 150,
     "snow_pea": 175,
     "repeater": 200,
-    "puff_shroom": 0,
+    "puff_shroom": 25,
     "fume_shroom": 75,
     "squash": 50,
 }
@@ -45,6 +45,8 @@ CARD_CATALOG_ORDER = (
     "fume_shroom",
     "squash",
 )
+
+RECOMMENDED_CARD_LOADOUT = ("imitator", "imitator", "imitator", "imitator", "sunflower", "squash")
 
 
 def card_cost(card_id: str, config: GameConfig) -> int:

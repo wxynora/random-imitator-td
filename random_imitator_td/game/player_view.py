@@ -5,7 +5,7 @@ import math
 import re
 from typing import Any
 
-from .cards import build_card_catalog
+from .cards import RECOMMENDED_CARD_LOADOUT, build_card_catalog
 from . import plant_behaviors, zombie_behaviors
 from .config import GameConfig, SCHEMA_VERSION
 from .models import GameState, PlantDef, PlantInstance, ZombieDef, ZombieInstance
@@ -292,13 +292,16 @@ def build_card_selection_view(config: GameConfig) -> dict[str, Any]:
         f"{_card_name(str(card['card_id']))}({card['cost']})"
         for card in catalog
     )
+    recommended = " ".join(_card_name(card_id) for card_id in RECOMMENDED_CARD_LOADOUT)
     return {
         "format": "card_selection_text_v1",
         "text": (
             f"开局选卡: 槽位{config.card_slot_count}/{config.max_card_slot_count}，可重复选择\n"
+            f"默认卡组: {recommended}\n"
             f"候选卡: {cards}"
         ),
         "card_catalog": catalog,
+        "recommended_loadout": list(RECOMMENDED_CARD_LOADOUT),
     }
 
 
@@ -582,6 +585,24 @@ def _event_line(event: dict[str, Any]) -> str | None:
         return f"{lane}路{col}列种下{PLANT_NAMES.get(str(event.get('plant_id')), event.get('plant_id'))}"
     if event_type == "plant_card_played":
         return f"{lane}路{col}列使用{PLANT_NAMES.get(str(event.get('card_id')), event.get('card_id'))}"
+    if event_type == "plant_triggered":
+        display_lane = event.get("lane", event.get("plant_lane"))
+        display_col = event.get("col", event.get("plant_col"))
+        plant_ref = event.get("plant_type") or event.get("plant_id")
+        plant_name = PLANT_NAMES.get(str(plant_ref), str(plant_ref))
+        counts: list[str] = []
+        killed = event.get("killed_zombies")
+        damaged = event.get("damaged_zombies")
+        frozen = event.get("frozen_zombies")
+        if isinstance(killed, list) and killed:
+            counts.append(f"消灭{len(killed)}只")
+        if isinstance(damaged, list) and damaged:
+            counts.append(f"影响{len(damaged)}只")
+        if isinstance(frozen, list) and frozen:
+            counts.append(f"冻结{len(frozen)}只")
+        suffix = f"（{'，'.join(counts)}）" if counts else ""
+        position = f"{display_lane}路{display_col}列" if display_lane is not None and display_col is not None else ""
+        return f"{position}{plant_name}触发{suffix}"
     if event_type == "reveal_spawned_zombie":
         if event.get("flavor_text"):
             return f"{lane}路{_x_to_text(event.get('x'))}开奖: {event['flavor_text']}"

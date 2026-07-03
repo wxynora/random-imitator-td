@@ -424,6 +424,7 @@ class ImitatorPvzP2Tests(unittest.TestCase):
         self.assertEqual(catalog["imitator"]["cost"], 0)
         self.assertEqual(catalog["coffee_bean"]["cost"], 75)
         self.assertEqual(catalog["sunflower"]["cost"], 50)
+        self.assertEqual(catalog["puff_shroom"]["cost"], 25)
         self.assertEqual(catalog["cherry_bomb"]["cost"], 150)
 
     def test_card_selection_view_renders_catalog_prices(self) -> None:
@@ -431,7 +432,9 @@ class ImitatorPvzP2Tests(unittest.TestCase):
 
         self.assertEqual(view["format"], "card_selection_text_v1")
         self.assertIn("槽位6/10", view["text"])
+        self.assertIn("默认卡组: 模仿者 模仿者 模仿者 模仿者 向日葵 窝瓜", view["text"])
         self.assertIn("模仿者(0)", view["text"])
+        self.assertIn("小喷菇(25)", view["text"])
         self.assertIn("咖啡豆(75)", view["text"])
         self.assertIn("樱桃炸弹(150)", view["text"])
 
@@ -1414,6 +1417,48 @@ class ImitatorPvzP2Tests(unittest.TestCase):
 
         self.assertIn("3路4.2列 路障僵尸被消灭", observation["player_view"]["text"])
         self.assertIn("2路5列未开奖模仿者被吃掉", observation["player_view"]["text"])
+
+    def test_player_view_reports_instant_plant_trigger(self) -> None:
+        engine = GameEngine(wave_schedule=[])
+
+        observation = engine.build_observation(
+            reason=[],
+            events=[
+                {
+                    "type": "plant_triggered",
+                    "plant_id": "cherry_bomb",
+                    "lane": 4,
+                    "col": 6,
+                    "killed_zombies": ["z1", "z2"],
+                }
+            ],
+            advance_summary={},
+        )
+
+        self.assertIn("4路6列樱桃炸弹触发（消灭2只）", observation["player_view"]["text"])
+
+    def test_player_view_reports_entity_plant_trigger_without_none(self) -> None:
+        engine = GameEngine(wave_schedule=[])
+
+        observation = engine.build_observation(
+            reason=[],
+            events=[
+                {
+                    "type": "plant_triggered",
+                    "plant_id": "p61",
+                    "plant_type": "squash",
+                    "lane": 4,
+                    "col": 6,
+                    "zombie_id": "z1",
+                    "damage": 1800,
+                }
+            ],
+            advance_summary={},
+        )
+
+        self.assertIn("4路6列窝瓜触发", observation["player_view"]["text"])
+        self.assertNotIn("None", observation["player_view"]["text"])
+        self.assertNotIn("p61触发", observation["player_view"]["text"])
 
     def test_player_view_marks_unarmed_potato_mine(self) -> None:
         engine = GameEngine(wave_schedule=[])
