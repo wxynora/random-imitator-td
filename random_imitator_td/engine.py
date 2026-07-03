@@ -1,0 +1,425 @@
+from __future__ import annotations
+
+import json
+import os
+import shlex
+from pathlib import Path
+from typing import Any
+
+from .game.config import GameConfig
+from .game.contracts import ContractError
+from .game.engine import GameEngine
+from .game.events import Event
+from .game.models import (
+    BossEventInstance,
+    GameState,
+    PendingImitator,
+    PlantInstance,
+    ZombieInstance,
+    to_jsonable,
+)
+from .game.player_view import CARD_COMMANDS, PLANT_NAMES, build_card_selection_view, parse_player_text_action_plan
+from .game.presets import build_wave_schedule, config_for_level
+from .game.randomizer import ReplayRng
+
+
+SAVE_VERSION = 1
+DEFAULT_SAVE_PATH = Path(os.environ.get("RANDOM_IMITATOR_TD_SAVE", Path.cwd() / "random_imitator_td_save.json"))
+DEFAULT_CARD_LOADOUT: tuple[str, ...] = ()
+ALIASES = {
+    "new": "new_game",
+    "restart": "new_game",
+    "reset": "new_game",
+    "重开": "new_game",
+    "新游戏": "new_game",
+    "状态": "status",
+    "帮助": "help",
+    "卡槽": "cards",
+    "选卡": "cards",
+    "选": "cards",
+    "选择": "cards",
+    "观察": "look",
+    "棋盘": "look",
+    "看": "look",
+    "复盘": "note",
+    "笔记": "note",
+}
+
+
+def cmd(text: str) -> str:
+    session = _load_or_create_session()
+    raw_text = text.strip()
+    parts = [raw_text] if _looks_like_gameplay_command(raw_text) else [part.strip() for part in raw_text.replace("\n", ";").split(";") if part.strip()]
+    if not parts:
+        return _current_view(session)
+
+    outputs: list[str] = []
+    for part in parts[:12]:
+        outputs.append(_route_command(session, part))
+
+    _save_session(session)
+    return "\n\n".join(output for output in outputs if output).strip()
+
+
+def _route_command(session: dict[str, Any], part: str) -> str:
+    words = shlex.split(part)
+    if not words:
+        return _current_view(session)
+    command = ALIASES.get(words[0].lower(), words[0].lower())
+    args = words[1:]
+
+    if command in {"help", "h"}:
+        return _help_text()
+    if command in {"status", "s"}:
+        return _status_text(session)
+    if command in {"look", "l"}:
+        return _current_view(session)
+    if command in {"new_game", "newgame"}:
+        return _new_game(session, args)
+    if command in {"cards", "loadout"}:
+        return _set_cards(session, args)
+    if command in {"note", "notes"}:
+        return _set_note(session, args)
+    if command in {"recap"}:
+        return _recap(session)
+
+    engine = _engine_from_session(session)
+    if engine is None:
+        return _setup_text(session)
+    observation = engine.run_until_decision()
+    try:
+        plan = parse_player_text_action_plan(
+            part,
+            observation=observation,
+            action_plan_id=f"cmd_{session.get('turn', 0) + 1}",
+        )
+        result = engine.apply_action_plan(plan, observation_id=observation["observation_id"])
+    except (ContractError, ValueError) as exc:
+        return f"动作未执行: {exc}\n\n{observation['player_view']['text']}\n{_state_json(engine)}"
+    session["turn"] = int(session.get("turn", 0)) + 1
+    _store_engine(session, engine)
+    return f"{result['observation']['player_view']['text']}\n{_state_json(engine)}"
+
+
+def _looks_like_gameplay_command(text: str) -> bool:
+    if not text.strip():
+        return False
+    try:
+        words = shlex.split(text.strip().replace("\n", " ", 1))
+    except ValueError:
+        return False
+    if not words:
+        return False
+    command = ALIASES.get(words[0].lower(), words[0].lower())
+    return command not in {
+        "help",
+        "h",
+        "status",
+        "s",
+        "look",
+        "l",
+        "new_game",
+        "newgame",
+        "cards",
+        "loadout",
+        "note",
+        "notes",
+        "recap",
+    }
+
+
+def _new_game(session: dict[str, Any], args: list[str]) -> str:
+    options = _parse_options(args)
+    level = _int_option(options, "level", default=int(session.get("level", 1)), minimum=1)
+    seed = str(options.get("seed") or session.get("seed") or "RITD-001")
+    session.clear()
+    session.update({"version": SAVE_VERSION, "turn": 0, "level": level, "seed": seed, "card_loadout": []})
+    loadout = _loadout_from_options(options)
+    if loadout is None:
+        return _setup_text(session, prefix=f"新游戏: lv{level} seed={seed}\n请先编辑卡槽。")
+    engine = _new_engine(level=level, seed=seed, card_loadout=loadout)
+    session["card_loadout"] = list(loadout)
+    _store_engine(session, engine)
+    observation = engine.run_until_decision()
+    return f"新游戏: lv{level} seed={seed} 卡槽={_loadout_text(loadout)}\n\n{observation['player_view']['text']}\n{_state_json(engine)}"
+
+
+def _set_cards(session: dict[str, Any], args: list[str]) -> str:
+    if not args:
+        return build_card_selection_view(GameConfig(card_slot_count=6, max_card_slot_count=10))["text"]
+    loadout = tuple(_card_id(arg) for arg in args)
+    invalid = [arg for arg, card_id in zip(args, loadout) if card_id is None]
+    if invalid:
+        return f"未知卡牌: {', '.join(invalid)}\n\n{build_card_selection_view(GameConfig(card_slot_count=6, max_card_slot_count=10))['text']}"
+    clean_loadout = tuple(card_id for card_id in loadout if card_id is not None)
+    level = int(session.get("level", 1))
+    seed = str(session.get("seed") or "RITD-001")
+    engine = _new_engine(level=level, seed=seed, card_loadout=clean_loadout)
+    session["turn"] = 0
+    session["card_loadout"] = list(clean_loadout)
+    _store_engine(session, engine)
+    observation = engine.run_until_decision()
+    return f"卡槽已设置: {_loadout_text(clean_loadout)}\n\n{observation['player_view']['text']}\n{_state_json(engine)}"
+
+
+def _set_note(session: dict[str, Any], args: list[str]) -> str:
+    note = " ".join(args).strip()
+    engine = _engine_from_session(session)
+    if note:
+        notes = [{"memory_id": "player_note_1", "note": note, "source_round_id": "manual", "updated_tick": engine.state.tick}]
+        engine.set_player_notes(notes)
+        _store_engine(session, engine)
+        return f"复盘已记录: {note}\n{_state_json(engine)}"
+    notes = engine.player_notes
+    if not notes:
+        return f"暂无复盘记录。\n{_state_json(engine)}"
+    return "\n".join(f"- {item.get('note', '')}" for item in notes)
+
+
+def _recap(session: dict[str, Any]) -> str:
+    engine = _engine_from_session(session)
+    recap = engine.build_run_recap()
+    lines = [
+        "本局统计:",
+        f"- 结果: {recap.get('result')}",
+        f"- tick: {recap.get('final_tick')}",
+        f"- 回合: {len(engine.player_round_history)}",
+    ]
+    if "reveal_category_counts" in recap:
+        lines.append(f"- 开奖: {recap['reveal_category_counts']}")
+    return "\n".join(lines) + "\n" + _state_json(engine)
+
+
+def _current_view(session: dict[str, Any]) -> str:
+    engine = _engine_from_session(session)
+    if engine is None:
+        return _setup_text(session)
+    observation = engine.run_until_decision()
+    _store_engine(session, engine)
+    _save_session(session)
+    return f"{observation['player_view']['text']}\n{_state_json(engine)}"
+
+
+def _status_text(session: dict[str, Any]) -> str:
+    engine = _engine_from_session(session)
+    if engine is None:
+        return _setup_text(session)
+    return _state_json(engine)
+
+
+def _help_text() -> str:
+    return "\n".join(
+        [
+            "随机模仿者文字塔防",
+            "",
+            "命令:",
+            "  new_game level=1 seed=demo",
+            "  cards 模仿者 模仿者 模仿者 模仿者 向日葵 窝瓜",
+            "  种 模仿者 3-4; 种 向日葵 2-3",
+            "  等待 200",
+            "  铲 3-4",
+            "  等待",
+            "  结束本局",
+            "  note 第一局自己的复盘",
+            "  recap / look / status / help",
+        ]
+    )
+
+
+def _load_or_create_session() -> dict[str, Any]:
+    if DEFAULT_SAVE_PATH.exists():
+        with DEFAULT_SAVE_PATH.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    session: dict[str, Any] = {"version": SAVE_VERSION, "turn": 0, "level": 1, "seed": "RITD-001"}
+    session["card_loadout"] = list(DEFAULT_CARD_LOADOUT)
+    _save_session(session)
+    return session
+
+
+def _save_session(session: dict[str, Any]) -> None:
+    DEFAULT_SAVE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with DEFAULT_SAVE_PATH.open("w", encoding="utf-8") as handle:
+        json.dump(session, handle, ensure_ascii=False, indent=2)
+
+
+def _new_engine(*, level: int, seed: str, card_loadout: tuple[str, ...]) -> GameEngine:
+    config = config_for_level(level, GameConfig(card_loadout=card_loadout, card_slot_count=max(6, len(card_loadout))))
+    engine = GameEngine(config=config, seed=seed, wave_schedule=build_wave_schedule(level), run_id=f"cmd-lv{level}-{seed}")
+    engine.state.level = level
+    return engine
+
+
+def _store_engine(session: dict[str, Any], engine: GameEngine) -> None:
+    session["level"] = engine.state.level
+    session["seed"] = engine.rng.seed
+    session["engine"] = _engine_to_json(engine)
+
+
+def _engine_from_session(session: dict[str, Any]) -> GameEngine | None:
+    payload = session.get("engine")
+    if isinstance(payload, dict):
+        return _engine_from_json(payload)
+    return None
+
+
+def _setup_text(session: dict[str, Any], *, prefix: str | None = None) -> str:
+    level = int(session.get("level", 1))
+    seed = str(session.get("seed") or "RITD-001")
+    lines = []
+    if prefix:
+        lines.append(prefix)
+    else:
+        lines.append(f"新局准备中: lv{level} seed={seed}")
+        lines.append("请先编辑卡槽。")
+    lines.append("")
+    lines.append("格式: cards 模仿者 模仿者 模仿者 模仿者 向日葵 窝瓜")
+    lines.append("提示: 模仿者越多，随机味越足。")
+    lines.append("")
+    lines.append(build_card_selection_view(GameConfig(card_slot_count=6, max_card_slot_count=10))["text"])
+    return "\n".join(lines)
+
+
+def _engine_to_json(engine: GameEngine) -> dict[str, Any]:
+    return {
+        "config": to_jsonable(engine.config),
+        "state": to_jsonable(engine.state),
+        "rng": engine.rng.snapshot(),
+        "wave_schedule": [list(item) for item in engine.wave_schedule],
+        "event_log": [to_jsonable(event) for event in engine.event_log],
+        "entity_counter": engine._entity_counter,
+        "event_counter": engine._event_counter,
+        "observation_counter": engine._observation_counter,
+        "round_counter": engine._round_counter,
+        "mode": engine.mode,
+        "run_id": engine.run_id,
+        "player_notes": to_jsonable(engine.player_notes),
+        "player_round_history": to_jsonable(engine.player_round_history),
+        "player_view_seen_unit_ids": sorted(engine._player_view_seen_unit_ids),
+    }
+
+
+def _engine_from_json(payload: dict[str, Any]) -> GameEngine:
+    config = _config_from_json(payload["config"])
+    engine = GameEngine(
+        config=config,
+        seed=payload.get("rng", {}).get("seed", "RITD-001"),
+        wave_schedule=[tuple(item) for item in payload.get("wave_schedule", [])],
+        player_notes=list(payload.get("player_notes", [])),
+        player_round_history=list(payload.get("player_round_history", [])),
+        mode=str(payload.get("mode", "random_imitator")),
+        run_id=str(payload.get("run_id", "cmd-run")),
+    )
+    engine.state = _state_from_json(payload["state"])
+    engine.rng = ReplayRng.from_snapshot(payload.get("rng", {}))
+    engine.event_log = [_event_from_json(item) for item in payload.get("event_log", [])]
+    engine._entity_counter = int(payload.get("entity_counter", 0))
+    engine._event_counter = int(payload.get("event_counter", 0))
+    engine._observation_counter = int(payload.get("observation_counter", 0))
+    engine._round_counter = int(payload.get("round_counter", len(engine.player_round_history)))
+    engine._player_view_seen_unit_ids = set(payload.get("player_view_seen_unit_ids", []))
+    return engine
+
+
+def _config_from_json(payload: dict[str, Any]) -> GameConfig:
+    data = dict(payload)
+    if "card_loadout" in data:
+        data["card_loadout"] = tuple(data["card_loadout"])
+    return GameConfig(**data)
+
+
+def _state_from_json(payload: dict[str, Any]) -> GameState:
+    return GameState(
+        tick=int(payload["tick"]),
+        sun=int(payload["sun"]),
+        level=int(payload["level"]),
+        grid={_cell_key(key): value for key, value in payload["grid"].items()},
+        plants={key: PlantInstance(**value) for key, value in payload.get("plants", {}).items()},
+        pending_imitators={key: PendingImitator(**value) for key, value in payload.get("pending_imitators", {}).items()},
+        zombies={key: ZombieInstance(**value) for key, value in payload.get("zombies", {}).items()},
+        boss_events={key: BossEventInstance(**value) for key, value in payload.get("boss_events", {}).items()},
+        cooldowns=dict(payload.get("cooldowns", {})),
+        lawnmowers={int(key): bool(value) for key, value in payload.get("lawnmowers", {}).items()},
+        wave_state=dict(payload.get("wave_state", {})),
+        scheduled_events=list(payload.get("scheduled_events", [])),
+        game_over=bool(payload.get("game_over", False)),
+        result=payload.get("result"),
+    )
+
+
+def _event_from_json(payload: dict[str, Any]) -> Event:
+    return Event(
+        event_id=str(payload["event_id"]),
+        tick=int(payload["tick"]),
+        phase=str(payload["phase"]),
+        type=str(payload["type"]),
+        severity=str(payload["severity"]),
+        payload=dict(payload.get("payload", {})),
+        source_id=payload.get("source_id"),
+        cause_event_ids=payload.get("cause_event_ids"),
+        visible_to_ai=bool(payload.get("visible_to_ai", True)),
+    )
+
+
+def _cell_key(value: str) -> tuple[int, int]:
+    lane, col = value.split(",", 1)
+    return int(lane), int(col)
+
+
+def _parse_options(args: list[str]) -> dict[str, Any]:
+    options: dict[str, Any] = {}
+    loose_cards: list[str] = []
+    for arg in args:
+        if "=" in arg:
+            key, value = arg.split("=", 1)
+            options[key.strip().lower()] = value.strip()
+        else:
+            loose_cards.append(arg)
+    if loose_cards:
+        cards = [str(options["cards"])] if options.get("cards") else []
+        cards.extend(loose_cards)
+        options["cards"] = " ".join(cards)
+    return options
+
+
+def _int_option(options: dict[str, Any], key: str, *, default: int, minimum: int) -> int:
+    try:
+        return max(minimum, int(options.get(key, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _loadout_from_options(options: dict[str, Any]) -> tuple[str, ...] | None:
+    raw_cards = options.get("cards") or options.get("loadout")
+    if not raw_cards:
+        return None
+    cards = [item for item in str(raw_cards).replace(",", " ").replace("，", " ").split() if item]
+    loadout = tuple(_card_id(item) for item in cards)
+    if any(item is None for item in loadout):
+        return None
+    return tuple(item for item in loadout if item is not None)
+
+
+def _card_id(name: str) -> str | None:
+    normalized = name.strip()
+    if not normalized:
+        return None
+    if normalized in {"imitator", "模仿者", "模"}:
+        return "imitator"
+    if normalized in CARD_COMMANDS:
+        return CARD_COMMANDS[normalized]
+    if normalized in PLANT_NAMES:
+        return normalized
+    return None
+
+
+def _loadout_text(loadout: tuple[str, ...]) -> str:
+    if not loadout:
+        return "默认"
+    return ",".join(PLANT_NAMES.get(card_id, "模仿者" if card_id == "imitator" else card_id) for card_id in loadout)
+
+
+def _state_json(engine: GameEngine) -> str:
+    return (
+        f'{{"level": {engine.state.level}, "tick": {engine.state.tick}, "sun": {engine.state.sun}, '
+        f'"result": "{engine.state.result or "running"}", "turns": {engine._round_counter}}}'
+    )

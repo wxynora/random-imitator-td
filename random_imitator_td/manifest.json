@@ -1,0 +1,22 @@
+{
+  "name": "random_imitator_td",
+  "title": "随机模仿者文字塔防",
+  "icon": "🌱",
+  "version": "0.1.0",
+  "module": "engine",
+  "desc": "给 AI 玩家玩的纯 Python 随机模仿者文字塔防。暴露 cmd(text) 单入口，可复制目录或 import 后直接游玩。",
+  "shared": {
+    "energy_cost": 0,
+    "free_commands": ["help", "h", "status", "s", "look", "l", "cards", "note"],
+    "produces": [],
+    "consumes": []
+  },
+  "trophies": [
+    {
+      "id": "first_clear_lv1",
+      "name": "第一次守住草坪",
+      "icon": "🏆",
+      "desc": "通关 lv1"
+    }
+  ]
+}

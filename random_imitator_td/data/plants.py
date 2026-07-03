@@ -1,0 +1,46 @@
+from __future__ import annotations
+
+from random_imitator_td.game.models import PlantDef
+
+
+PLANTS: dict[str, PlantDef] = {
+    "peashooter": PlantDef("peashooter", 300, 14, 20, "lane_forward"),
+    "sunflower": PlantDef("sunflower", 300, None, None, "none", "sun_producer"),
+    "wallnut": PlantDef("wallnut", 4000, None, None, "none", "blocker"),
+    "cherry_bomb": PlantDef("cherry_bomb", 300, None, 1800, "area_3x3", "instant"),
+    "potato_mine": PlantDef("potato_mine", 300, None, 1800, "cell", "armed_after_150"),
+    "snow_pea": PlantDef("snow_pea", 300, 14, 20, "lane_forward", "slow_projectile"),
+    "repeater": PlantDef("repeater", 300, 14, 20, "lane_forward", "double_shot"),
+    "split_pea": PlantDef("split_pea", 300, 14, 20, "lane_both", "split_shot"),
+    "squash": PlantDef("squash", 300, None, 1800, "near_cell", "instant_squash"),
+    "lily_pad": PlantDef("lily_pad", 300, None, None, "none", "water_platform"),
+    "puff_shroom": PlantDef("puff_shroom", 300, 14, 20, "lane_forward_short", "day_sleeper"),
+    "grave_buster": PlantDef("grave_buster", 300, None, None, "none", "grave_buster"),
+    "flower_pot": PlantDef("flower_pot", 300, None, None, "none", "roof_platform"),
+    "coffee_bean": PlantDef("coffee_bean", 300, None, None, "none", "wake_sleeping_mushroom"),
+    "sea_shroom": PlantDef("sea_shroom", 300, 30, 20, "lane_forward_short", "day_sleeper,water_plant"),
+    "plantern": PlantDef("plantern", 300, None, None, "none", "fog_reveal"),
+    "scaredy_shroom": PlantDef(
+        "scaredy_shroom",
+        300,
+        14,
+        20,
+        "lane_forward",
+        "day_sleeper,scared_when_near",
+    ),
+    "threepeater": PlantDef("threepeater", 300, 14, 20, "three_lanes_forward", "three_lane_shot"),
+    "chomper": PlantDef("chomper", 300, 420, 1800, "near_cell", "chomper,starts_ready"),
+    "fume_shroom": PlantDef("fume_shroom", 300, 14, 20, "lane_forward_pierce", "day_sleeper,piercing"),
+    "cactus": PlantDef("cactus", 300, 14, 20, "lane_forward", "anti_air"),
+    "starfruit": PlantDef("starfruit", 300, 14, 20, "star_five_way", "star_shot"),
+    "spikeweed": PlantDef("spikeweed", 300, 14, 20, "ground_cell", "non_blocking,vehicle_spike"),
+    "tallnut": PlantDef("tallnut", 8000, None, None, "none", "blocker,tall_blocker"),
+    "pumpkin": PlantDef("pumpkin", 4000, None, None, "none", "blocker,pumpkin_shell"),
+    "magnet_shroom": PlantDef("magnet_shroom", 300, 150, None, "full_board", "day_sleeper,magnet"),
+    "umbrella_leaf": PlantDef("umbrella_leaf", 300, None, None, "none", "umbrella_protect"),
+    "cattail": PlantDef("cattail", 300, 14, 20, "full_board", "double_shot,homing,anti_air"),
+    "blover": PlantDef("blover", 300, None, None, "full_board", "instant_blover"),
+    "jalapeno": PlantDef("jalapeno", 300, None, 1800, "full_lane", "instant_jalapeno"),
+    "ice_shroom": PlantDef("ice_shroom", 300, None, None, "full_board", "day_sleeper,instant_freeze"),
+    "doom_shroom": PlantDef("doom_shroom", 300, None, 1800, "area_large", "day_sleeper,instant_doom"),
+}

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "random-imitator-td"
+version = "0.1.0"
+description = "A pure-Python text tower-defense game with random imitator reveals for AI players."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Random Imitator TD contributors" }]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+]
+
+[project.scripts]
+random-imitator-td = "random_imitator_td.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["random_imitator_td*"]
+
+[tool.setuptools.package-data]
+random_imitator_td = ["manifest.json", "README.md"]
