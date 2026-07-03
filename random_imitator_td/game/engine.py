@@ -19,10 +19,39 @@ from .timing import real_seconds_to_decision_delay_ticks
 
 
 EARLY_REVEAL_RELIEF_MAX_LEVEL = 2
-EARLY_REVEAL_RELIEF_UNTIL_TICK = 500
+EARLY_REVEAL_RELIEF_UNTIL_TICK = 620
+EARLY_REVEAL_HOME_BUFFER_MIN_X = 3.5
+EARLY_REVEAL_CLUSTER_PRESSURE_COUNT = 2
+HIGH_PRESSURE_REVEAL_ZOMBIES = {
+    "buckethead",
+    "pole_vaulting",
+    "jack_in_the_box",
+    "football",
+    "gargantuar",
+    "dancing",
+    "pogo",
+    "catapult",
+    "zomboni",
+}
 EARLY_REVEAL_PRESSURE_WEIGHT_CAPS = {
-    "chaos_pole_vaulting_zombie": 3,
+    "chaos_buckethead_zombie": 4,
+    "chaos_pole_vaulting_zombie": 2,
+    "chaos_jack_in_the_box_zombie": 2,
     "chaos_football_zombie": 1,
+    "chaos_pogo_zombie": 1,
+    "chaos_catapult_zombie": 1,
+    "chaos_zomboss": 1,
+}
+EARLY_REVEAL_CLUSTER_PRESSURE_WEIGHT_CAPS = {
+    "chaos_buckethead_zombie": 1,
+    "chaos_pole_vaulting_zombie": 1,
+    "chaos_jack_in_the_box_zombie": 1,
+    "chaos_football_zombie": 0,
+    "chaos_gargantuar_zombie": 0,
+    "chaos_pogo_zombie": 0,
+    "chaos_catapult_zombie": 0,
+    "chaos_zomboni_zombie": 0,
+    "chaos_zomboss": 0,
 }
 
 def cell_block_threshold(col: int) -> float:
@@ -571,6 +600,7 @@ class GameEngine:
             }
             for boss in sorted(self.state.boss_events.values(), key=lambda item: item.entity_id)
         ]
+        observation["wave_progress"] = self._wave_progress_observation()
         card_slots = self._card_slot_observations()
         cooldown_remaining = min((slot["cooldown_remaining_ticks"] for slot in card_slots), default=0)
         card_slot_count = len(card_slots)
@@ -620,6 +650,7 @@ class GameEngine:
             card_slots=card_slots,
             previously_seen_unit_ids=self._player_view_seen_unit_ids,
             card_costs=observation["action_constraints"]["card_costs"],
+            wave_progress=observation["wave_progress"],
         )
         observation["player_view"] = player_view
         self._player_view_seen_unit_ids.update(seen_unit_ids)
@@ -856,6 +887,32 @@ class GameEngine:
             return (prefix, int(suffix))
         return (slot_id, 0)
 
+    def _wave_progress_observation(self) -> dict[str, Any]:
+        total = int(self.state.wave_state.get("total", len(self.wave_schedule)) or 0)
+        spawned = min(total, int(self.state.wave_state.get("spawned_count", 0) or 0))
+        completed = bool(self.state.wave_state.get("completed")) or (total > 0 and spawned >= total)
+        upcoming = [
+            (tick, zombie_id, lane)
+            for tick, zombie_id, lane in self.wave_schedule
+            if tick > self.state.tick
+        ]
+        next_wave = min(upcoming, key=lambda item: (item[0], item[2], item[1]), default=None)
+        result: dict[str, Any] = {
+            "spawned": spawned,
+            "total": total,
+            "completed": completed,
+            "remaining": max(0, total - spawned),
+        }
+        if next_wave is not None and not completed:
+            tick, zombie_id, lane = next_wave
+            result["next"] = {
+                "tick": tick,
+                "in_ticks": max(0, tick - self.state.tick),
+                "lane": lane,
+                "zombie_type": zombie_id,
+            }
+        return result
+
     def _reveal_due_imitators(self) -> list[Event]:
         events: list[Event] = []
         due_ids = [
@@ -887,7 +944,14 @@ class GameEngine:
             if result.kind == "plant":
                 events.extend(self._spawn_plant_from_reveal(imitator, result, reveal_event.event_id))
             elif result.kind == "spawn_zombie":
-                events.append(self._spawn_zombie(result.payload["zombie_id"], imitator.lane, x=imitator.col + 0.5, source="reveal"))
+                events.append(
+                    self._spawn_zombie(
+                        result.payload["zombie_id"],
+                        imitator.lane,
+                        x=self._reveal_zombie_spawn_x(imitator),
+                        source="reveal",
+                    )
+                )
             elif result.kind == "boss_event":
                 events.append(self._spawn_boss_event(result, reveal_event.event_id))
             elif result.kind == "blank":
@@ -912,7 +976,8 @@ class GameEngine:
             boss_id=result.payload.get("boss_id", "zomboss"),
             started_tick=self.state.tick,
             end_tick=self.state.tick + duration_ticks,
-            next_action_tick=self.state.tick + action_interval_ticks,
+            next_action_tick=self.state.tick
+            + int(result.payload.get("first_action_delay_ticks", action_interval_ticks)),
             hp=int(result.payload.get("hp", 8000)),
             action_interval_ticks=action_interval_ticks,
         )
@@ -962,7 +1027,24 @@ class GameEngine:
         for result_id, cap in EARLY_REVEAL_PRESSURE_WEIGHT_CAPS.items():
             if result_id in adjusted:
                 adjusted[result_id] = min(adjusted[result_id], cap)
+        if self._early_high_pressure_count() >= EARLY_REVEAL_CLUSTER_PRESSURE_COUNT:
+            for result_id, cap in EARLY_REVEAL_CLUSTER_PRESSURE_WEIGHT_CAPS.items():
+                if result_id in adjusted:
+                    adjusted[result_id] = min(adjusted[result_id], cap)
         return adjusted
+
+    def _early_high_pressure_count(self) -> int:
+        return sum(
+            1
+            for zombie in self.state.zombies.values()
+            if zombie.zombie_id in HIGH_PRESSURE_REVEAL_ZOMBIES
+        ) + len(self.state.boss_events)
+
+    def _reveal_zombie_spawn_x(self, imitator: PendingImitator) -> float:
+        x = imitator.col + 0.5
+        if self.state.level <= EARLY_REVEAL_RELIEF_MAX_LEVEL and self.state.tick < EARLY_REVEAL_RELIEF_UNTIL_TICK:
+            return max(x, EARLY_REVEAL_HOME_BUFFER_MIN_X)
+        return x
 
     def _spawn_plant_from_reveal(
         self,
@@ -1333,7 +1415,7 @@ class GameEngine:
                     "projectile",
                     "zombie_died",
                     "strong",
-                    {"zombie_id": target.entity_id, "killed_by": plant.entity_id},
+                    self._zombie_death_payload(target, killed_by=plant.entity_id),
                     source_id=target.entity_id,
                 )
             )
@@ -1385,7 +1467,7 @@ class GameEngine:
                     "projectile",
                     "zombie_died",
                     "strong",
-                    {"zombie_id": target.entity_id},
+                    self._zombie_death_payload(target),
                     source_id=target.entity_id,
                 )
             )
@@ -1557,11 +1639,20 @@ class GameEngine:
                     "projectile",
                     "zombie_died",
                     "strong",
-                    {"zombie_id": target.entity_id, "killed_by": plant_entity_id},
+                    self._zombie_death_payload(target, killed_by=plant_entity_id),
                     source_id=target.entity_id,
                 )
             )
         return events
+
+    def _zombie_death_payload(self, zombie: ZombieInstance, **extra: Any) -> dict[str, Any]:
+        return {
+            "zombie_id": zombie.entity_id,
+            "zombie_type": zombie.zombie_id,
+            "lane": zombie.lane,
+            "x": zombie.x,
+            **extra,
+        }
 
     def _nearest_zombie_ahead(self, plant: PlantInstance) -> ZombieInstance | None:
         candidates = [
@@ -1607,7 +1698,7 @@ class GameEngine:
                     "projectile",
                     "zombie_died",
                     "strong",
-                    {"zombie_id": target.entity_id},
+                    self._zombie_death_payload(target),
                     source_id=target.entity_id,
                 )
             )

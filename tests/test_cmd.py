@@ -75,6 +75,19 @@ class ImitatorPvzCmdTests(unittest.TestCase):
             self.assertNotIn(cmd_engine.ANTI_ADDICTION_PAUSE_PREFIX, output)
             self.assertIn("资源: 阳光", output)
 
+    def test_cmd_does_not_fast_forward_before_player_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cmd_engine.DEFAULT_SAVE_PATH = Path(tmpdir) / "save.json"
+
+            cmd_engine.cmd("new_game level=1 seed=no-hidden-advance cards=模仿者 模仿者")
+            first = cmd_engine.cmd("种 模仿者 3-3")
+            second = cmd_engine.cmd("种 模仿者 3-4")
+
+            self.assertIn('"tick": 3', first)
+            self.assertIn('"tick": 6', second)
+            self.assertIn("3路4列种下模仿者", second)
+            self.assertNotIn("3路3列模仿者开奖", second)
+
     def test_cmd_open_prefers_existing_save(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             cmd_engine.DEFAULT_SAVE_PATH = Path(tmpdir) / "save.json"

@@ -69,7 +69,12 @@ P2_REVEAL_RESULTS: dict[str, RevealResultDef] = {
             "chaos_zomboss",
             "chaos",
             "boss_event",
-            {"boss_id": "zomboss", "duration_ticks": 600, "action_interval_ticks": 60},
+            {
+                "boss_id": "zomboss",
+                "duration_ticks": 600,
+                "action_interval_ticks": 60,
+                "first_action_delay_ticks": 90,
+            },
             3,
         ),
     )

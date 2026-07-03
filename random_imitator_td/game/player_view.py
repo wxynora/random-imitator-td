@@ -223,6 +223,7 @@ def build_player_view(
     card_slots: list[dict[str, Any]],
     previously_seen_unit_ids: set[str] | frozenset[str],
     card_costs: dict[str, int] | None = None,
+    wave_progress: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], set[str]]:
     current_unit_ids = _current_unit_ids(state, events)
     new_unit_ids = sorted(unit_id for unit_id in current_unit_ids if unit_id not in previously_seen_unit_ids)
@@ -231,6 +232,7 @@ def build_player_view(
     lines = [
         f"Lv{state.level} 场地:{stage_label} tick {state.tick}",
         f"资源: 阳光{state.sun} | 推车:{_lawnmower_line(state, config)}",
+        f"系统波次: {_wave_progress_line(wave_progress)}",
     ]
 
     event_lines = _event_lines(events)
@@ -267,7 +269,7 @@ def build_player_view(
         ]
     )
     lines.append("动作格式: 种 模仿者 3-4; 种 豌豆射手 2-3; 种 咖啡豆 2-3; 铲 4-5; 等待; 结束本局")
-    lines.append("规则: 咖啡豆会唤醒目标格的沉睡蘑菇；铲子只移除植物/未开奖模仿者，同格有僵尸也只铲植物；动作失败会中断后续动作")
+    lines.append("规则: 咖啡豆会唤醒目标格的沉睡蘑菇；铲子只移除植物/未开奖模仿者，同格有僵尸也只铲植物；动作失败会中断后续动作，已发生的推进保留")
 
     return (
         {
@@ -443,6 +445,27 @@ def _lawnmower_line(state: GameState, config: GameConfig) -> str:
     return ",".join(available) if available else "无"
 
 
+def _wave_progress_line(wave_progress: dict[str, Any] | None) -> str:
+    if not wave_progress:
+        return "未知"
+    total = wave_progress.get("total", 0)
+    spawned = wave_progress.get("spawned", 0)
+    if not isinstance(total, int) or total <= 0:
+        return "无"
+    if wave_progress.get("completed"):
+        return f"{spawned}/{total}，已结束；新增僵尸来自模仿者或特殊事件"
+    next_wave = wave_progress.get("next")
+    if isinstance(next_wave, dict):
+        lane = next_wave.get("lane")
+        tick = next_wave.get("tick")
+        in_ticks = next_wave.get("in_ticks")
+        zombie_type = next_wave.get("zombie_type")
+        zombie_name = ZOMBIE_NAMES.get(str(zombie_type), str(zombie_type))
+        if isinstance(lane, int) and isinstance(tick, int) and isinstance(in_ticks, int):
+            return f"{spawned}/{total}，下一只 tick {tick}(约{in_ticks}ticks后): {lane}路{zombie_name}"
+    return f"{spawned}/{total}"
+
+
 def _lane_cells(
     state: GameState,
     config: GameConfig,
@@ -555,6 +578,10 @@ def _event_line(event: dict[str, Any]) -> str | None:
         return f"{lane}路{col}列模仿者开奖"
     if event_type == "reveal_spawned_plant":
         return f"{lane}路{col}列变成{PLANT_NAMES.get(str(event.get('plant_id')), event.get('plant_id'))}"
+    if event_type == "plant_card_planted":
+        return f"{lane}路{col}列种下{PLANT_NAMES.get(str(event.get('plant_id')), event.get('plant_id'))}"
+    if event_type == "plant_card_played":
+        return f"{lane}路{col}列使用{PLANT_NAMES.get(str(event.get('card_id')), event.get('card_id'))}"
     if event_type == "reveal_spawned_zombie":
         if event.get("flavor_text"):
             return f"{lane}路{_x_to_text(event.get('x'))}开奖: {event['flavor_text']}"
@@ -567,13 +594,22 @@ def _event_line(event: dict[str, Any]) -> str | None:
         return f"{lane}路{col}列铲掉{PLANT_NAMES.get(str(event.get('plant_type')), event.get('plant_type'))}"
     if event_type == "imitator_shoveled":
         return f"{lane}路{col}列铲掉未开奖模仿者"
+    if event_type == "imitator_destroyed_before_reveal":
+        return f"{lane}路{col}列未开奖模仿者被吃掉"
     if event_type == "plant_eaten":
         return f"{lane}路{col}列植物被吃掉"
     if event_type == "zombie_died":
         zombie_type = event.get("zombie_type")
+        prefix = ""
+        if isinstance(lane, int):
+            prefix = f"{lane}路"
+            if event.get("x") is not None:
+                prefix += f"{_x_to_text(event.get('x'))}"
+        if prefix:
+            prefix += " "
         if isinstance(zombie_type, str):
-            return f"{ZOMBIE_NAMES.get(zombie_type, zombie_type)}被消灭"
-        return "僵尸被消灭"
+            return f"{prefix}{ZOMBIE_NAMES.get(zombie_type, zombie_type)}被消灭"
+        return f"{prefix}僵尸被消灭"
     if event_type == "lawnmower_triggered":
         return f"{lane}路推车触发"
     if event_type == "jack_in_the_box_exploded":

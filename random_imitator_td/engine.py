@@ -104,7 +104,7 @@ def _route_command(session: dict[str, Any], part: str) -> str:
     pause_text = _consume_anti_addiction_pause(session, engine)
     if pause_text:
         return pause_text
-    observation = engine.run_until_decision()
+    observation = _action_observation(engine)
     try:
         plan = parse_player_text_action_plan(
             part,
@@ -119,6 +119,19 @@ def _route_command(session: dict[str, Any], part: str) -> str:
     output = f"{result['observation']['player_view']['text']}\n{_state_json(engine)}"
     _mark_anti_addiction_pause_if_due(session, int(session.get("turn", 0)), engine)
     return output
+
+
+def _action_observation(engine: GameEngine) -> dict[str, Any]:
+    return engine.build_observation(
+        reason=["before_player_action"],
+        events=[],
+        advance_summary={
+            "from_tick": engine.state.tick,
+            "to_tick": engine.state.tick,
+            "advanced_ticks": 0,
+            "stop_reason": "before_player_action",
+        },
+    )
 
 
 def _looks_like_gameplay_command(text: str) -> bool:

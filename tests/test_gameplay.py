@@ -446,6 +446,22 @@ class ImitatorPvzP2Tests(unittest.TestCase):
         self.assertEqual(len(build_wave_schedule(3)), 18)
         self.assertLess(max(tick for tick, _, _ in build_wave_schedule(1)), max(tick for tick, _, _ in build_wave_schedule(3)))
 
+    def test_observation_and_player_view_include_system_wave_progress(self) -> None:
+        engine = GameEngine(wave_schedule=[(10, "normal", 2), (30, "buckethead", 4)])
+
+        observation = engine.run_until_decision()
+
+        self.assertEqual(observation["wave_progress"]["spawned"], 0)
+        self.assertEqual(observation["wave_progress"]["total"], 2)
+        self.assertEqual(observation["wave_progress"]["next"]["tick"], 10)
+        self.assertIn("系统波次: 0/2，下一只 tick 10(约10ticks后): 2路普通僵尸", observation["player_view"]["text"])
+
+        engine.advance_until(max_ticks=30, stop_on_event=False)
+        observation = engine.build_observation(reason=["test"], events=[], advance_summary={})
+
+        self.assertTrue(observation["wave_progress"]["completed"])
+        self.assertIn("系统波次: 2/2，已结束；新增僵尸来自模仿者或特殊事件", observation["player_view"]["text"])
+
     def test_pending_imitator_reveals_as_peashooter(self) -> None:
         reveal_results = {
             "only_peashooter": RevealResultDef(
@@ -487,6 +503,65 @@ class ImitatorPvzP2Tests(unittest.TestCase):
         self.assertEqual(zombie.x, 3.5)
         engine.step_one_tick()
         self.assertLess(zombie.x, 3.5)
+
+    def test_early_reveal_zombie_spawn_keeps_home_buffer(self) -> None:
+        reveal_results = {
+            "only_zombie": RevealResultDef(
+                "only_zombie",
+                "chaos",
+                "spawn_zombie",
+                {"zombie_id": "normal"},
+                1,
+            )
+        }
+        engine = GameEngine(reveal_results=reveal_results, wave_schedule=[])
+        engine.state.level = 2
+        imitator = PendingImitator("i1", 3, 1, 300, 0, 1)
+        engine.state.grid[(3, 1)] = "i1"
+        engine.state.pending_imitators["i1"] = imitator
+        engine.state.scheduled_events.append({"type": "imitator_reveal", "entity_id": "i1", "tick": 1})
+
+        events = engine.step_one_tick()
+
+        spawn = next(event for event in events if event.type == "reveal_spawned_zombie")
+        self.assertEqual(spawn.payload["x"], 3.5)
+
+    def test_early_reveal_pressure_caps_clustered_bad_rolls(self) -> None:
+        engine = GameEngine(wave_schedule=[])
+        engine.state.level = 2
+        engine.state.tick = 200
+        engine.state.zombies["z1"] = ZombieInstance("z1", "football", lane=1, x=7.0, hp=1400)
+        engine.state.zombies["z2"] = ZombieInstance("z2", "buckethead", lane=2, x=7.0, hp=1300)
+
+        adjusted = engine._adjust_reveal_weights(
+            {
+                "chaos_buckethead_zombie": 10,
+                "chaos_pole_vaulting_zombie": 10,
+                "chaos_football_zombie": 10,
+                "chaos_zomboss": 10,
+            }
+        )
+
+        self.assertEqual(adjusted["chaos_buckethead_zombie"], 1)
+        self.assertEqual(adjusted["chaos_pole_vaulting_zombie"], 1)
+        self.assertEqual(adjusted["chaos_football_zombie"], 0)
+        self.assertEqual(adjusted["chaos_zomboss"], 0)
+
+    def test_boss_reveal_can_delay_first_action(self) -> None:
+        engine = GameEngine(wave_schedule=[])
+        result = RevealResultDef(
+            "boss",
+            "chaos",
+            "boss_event",
+            {"boss_id": "zomboss", "duration_ticks": 200, "action_interval_ticks": 40, "first_action_delay_ticks": 90},
+            1,
+        )
+
+        event = engine._spawn_boss_event(result, "cause")
+
+        boss = next(iter(engine.state.boss_events.values()))
+        self.assertEqual(boss.next_action_tick, 90)
+        self.assertEqual(event.payload["action_interval_ticks"], 40)
 
     def test_wave_spawn_does_not_include_reveal_flavor_text(self) -> None:
         engine = GameEngine(wave_schedule=[(1, "normal", 3)])
@@ -648,9 +723,9 @@ class ImitatorPvzP2Tests(unittest.TestCase):
         base_weights = {key: result.weight for key, result in P2_REVEAL_RESULTS.items()}
 
         engine.state.level = 2
-        engine.state.tick = 499
+        engine.state.tick = 619
         early_adjusted = engine._adjust_reveal_weights(base_weights)
-        self.assertEqual(early_adjusted["chaos_pole_vaulting_zombie"], 3)
+        self.assertEqual(early_adjusted["chaos_pole_vaulting_zombie"], 2)
         self.assertEqual(early_adjusted["chaos_football_zombie"], 1)
         self.assertEqual(base_weights["chaos_pole_vaulting_zombie"], 7)
         self.assertEqual(base_weights["chaos_football_zombie"], 3)
@@ -659,7 +734,7 @@ class ImitatorPvzP2Tests(unittest.TestCase):
         self.assertEqual(engine._adjust_reveal_weights(base_weights), base_weights)
 
         engine.state.level = 2
-        engine.state.tick = 500
+        engine.state.tick = 620
         self.assertEqual(engine._adjust_reveal_weights(base_weights), base_weights)
 
     def test_peashooter_instant_hits_nearest_zombie(self) -> None:
@@ -1323,17 +1398,22 @@ class ImitatorPvzP2Tests(unittest.TestCase):
         self.assertIn("咖啡豆会唤醒目标格的沉睡蘑菇", text)
         self.assertIn("铲子只移除植物/未开奖模仿者", text)
         self.assertIn("动作失败会中断后续动作", text)
+        self.assertIn("已发生的推进保留", text)
 
-    def test_player_view_reports_zombie_death(self) -> None:
+    def test_player_view_reports_zombie_death_and_imitator_destroyed(self) -> None:
         engine = GameEngine(wave_schedule=[])
 
         observation = engine.build_observation(
             reason=[],
-            events=[{"type": "zombie_died", "zombie_type": "conehead"}],
+            events=[
+                {"type": "zombie_died", "zombie_type": "conehead", "lane": 3, "x": 4.2},
+                {"type": "imitator_destroyed_before_reveal", "lane": 2, "col": 5},
+            ],
             advance_summary={},
         )
 
-        self.assertIn("路障僵尸被消灭", observation["player_view"]["text"])
+        self.assertIn("3路4.2列 路障僵尸被消灭", observation["player_view"]["text"])
+        self.assertIn("2路5列未开奖模仿者被吃掉", observation["player_view"]["text"])
 
     def test_player_view_marks_unarmed_potato_mine(self) -> None:
         engine = GameEngine(wave_schedule=[])
