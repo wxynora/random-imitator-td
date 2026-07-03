@@ -26,6 +26,8 @@ from .game.randomizer import ReplayRng
 SAVE_VERSION = 1
 DEFAULT_SAVE_PATH = Path(os.environ.get("RANDOM_IMITATOR_TD_SAVE", Path.cwd() / "random_imitator_td_save.json"))
 DEFAULT_CARD_LOADOUT: tuple[str, ...] = ()
+ANTI_ADDICTION_PAUSE_EVERY_TURNS = 5
+ANTI_ADDICTION_PAUSE_PREFIX = "防沉迷暂停"
 ALIASES = {
     "new": "new_game",
     "restart": "new_game",
@@ -41,6 +43,10 @@ ALIASES = {
     "观察": "look",
     "棋盘": "look",
     "看": "look",
+    "打开": "look",
+    "继续": "look",
+    "open": "look",
+    "resume": "look",
     "复盘": "note",
     "笔记": "note",
 }
@@ -98,7 +104,11 @@ def _route_command(session: dict[str, Any], part: str) -> str:
         return f"动作未执行: {exc}\n\n{observation['player_view']['text']}\n{_state_json(engine)}"
     session["turn"] = int(session.get("turn", 0)) + 1
     _store_engine(session, engine)
-    return f"{result['observation']['player_view']['text']}\n{_state_json(engine)}"
+    output = f"{result['observation']['player_view']['text']}\n{_state_json(engine)}"
+    pause_text = _anti_addiction_pause_text(int(session.get("turn", 0)), engine)
+    if pause_text:
+        output = f"{output}\n\n{pause_text}"
+    return output
 
 
 def _looks_like_gameplay_command(text: str) -> bool:
@@ -221,9 +231,17 @@ def _help_text() -> str:
             "  等待",
             "  结束本局",
             "  note 第一局自己的复盘",
-            "  recap / look / status / help",
+            "  recap / look / 打开 / 继续 / status / help",
         ]
     )
+
+
+def _anti_addiction_pause_text(turn: int, engine: GameEngine) -> str:
+    if turn <= 0 or turn % ANTI_ADDICTION_PAUSE_EVERY_TURNS != 0:
+        return ""
+    if engine.state.game_over:
+        return ""
+    return f"{ANTI_ADDICTION_PAUSE_PREFIX}: 已完成第{turn}回合，本次先停在这里；状态已保存，下次用同一存档继续。"
 
 
 def _load_or_create_session() -> dict[str, Any]:

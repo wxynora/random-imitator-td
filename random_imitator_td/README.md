@@ -25,6 +25,9 @@ python3 -m random_imitator_td '种 模仿者 3-4; 种 向日葵 2-3'
 提示: 模仿者越多，随机味越足。
 ```
 
+每 5 次玩家决策会输出一行防沉迷暂停；游戏不会结算输赢，存档已经停在当前状态，下次用同一存档继续。
+无参数启动、`打开`、`继续`、`look` 都会优先读取当前存档；只有显式 `new_game` 才会重开。
+
 ## 单游戏接入
 
 这个目录可以作为类似 `games/<name>/` 的单游戏模块使用：
@@ -41,7 +44,7 @@ python3 -m random_imitator_td '种 模仿者 3-4; 种 向日葵 2-3'
 ```text
 help
 status
-look
+look / 打开 / 继续
 new_game level=1 seed=demo
 cards 模仿者 模仿者 模仿者 模仿者 向日葵 窝瓜
 种 模仿者 3-4; 种 向日葵 2-3

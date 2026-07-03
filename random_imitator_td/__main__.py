@@ -9,7 +9,7 @@ def main() -> None:
     if len(sys.argv) > 1:
         print(cmd(" ".join(sys.argv[1:])))
         return
-    print(cmd("help"))
+    print(cmd(""))
 
 
 if __name__ == "__main__":
