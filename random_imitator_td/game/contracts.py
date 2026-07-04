@@ -18,7 +18,7 @@ ALLOWED_TOP_LEVEL_ACTION_PLAN_FIELDS = {
     "interrupt_policy",
     "actions",
 }
-ALLOWED_ACTIONS = {"plant_imitator", "plant_card", "shovel_plant", "wait", "end_game"}
+ALLOWED_ACTIONS = {"plant_imitator", "plant_card", "shovel_plant", "open_airdrop", "wait", "end_game"}
 ALLOWED_INTERRUPT_POLICIES = {
     "interrupt_on_emergency",
     "continue_unless_game_over",
@@ -29,10 +29,11 @@ ALLOWED_ACTION_FIELDS = {
     "plant_imitator": {"action", "lane", "col", "slot_id", "optional"},
     "plant_card": {"action", "lane", "col", "slot_id", "optional"},
     "shovel_plant": {"action", "lane", "col", "optional"},
+    "open_airdrop": {"action", "lane", "col", "optional"},
     "wait": {"action", "max_wait_ticks"},
     "end_game": {"action", "reason"},
 }
-CELL_ACTIONS = {"plant_imitator", "plant_card", "shovel_plant"}
+CELL_ACTIONS = {"plant_imitator", "plant_card", "shovel_plant", "open_airdrop"}
 PLANT_ACTIONS = {"plant_imitator", "plant_card"}
 OBSERVATION_REQUIRED_FIELDS = {
     "schema_version",

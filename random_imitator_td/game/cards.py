@@ -15,6 +15,8 @@ DIRECT_CARD_COSTS = {
     "repeater": 200,
     "puff_shroom": 25,
     "fume_shroom": 75,
+    "plantern": 25,
+    "flower_pot": 25,
     "squash": 50,
 }
 
@@ -28,6 +30,8 @@ DIRECT_CARD_COOLDOWN_TICKS = {
     "repeater": 80,
     "puff_shroom": 80,
     "fume_shroom": 80,
+    "plantern": 300,
+    "flower_pot": 80,
     "squash": 300,
 }
 
@@ -43,10 +47,15 @@ CARD_CATALOG_ORDER = (
     "repeater",
     "puff_shroom",
     "fume_shroom",
+    "plantern",
+    "flower_pot",
     "squash",
 )
 
 RECOMMENDED_CARD_LOADOUT = ("imitator", "imitator", "imitator", "imitator", "sunflower", "squash")
+FOG_CARD_LOADOUT = ("imitator", "imitator", "imitator", "imitator", "sunflower", "plantern")
+ROOF_CARD_LOADOUT = ("imitator", "imitator", "imitator", "imitator", "sunflower", "flower_pot")
+ALL_IMITATOR_CARD_LOADOUT = ("imitator",) * 6
 
 
 def card_cost(card_id: str, config: GameConfig) -> int:

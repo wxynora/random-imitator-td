@@ -11,11 +11,11 @@ if str(ROOT) not in sys.path:
 from random_imitator_td.game.config import GameConfig
 from random_imitator_td.game.contracts import validate_action_plan
 from random_imitator_td.data.reveal_pools import P2_REVEAL_RESULTS
-from random_imitator_td.game.engine import GameEngine
+from random_imitator_td.game.engine import AIRDROP_OUTCOME_WEIGHTS, GameEngine
 from random_imitator_td.game.experience import make_player_note, update_player_note
 from random_imitator_td.game.player_view import build_card_selection_view, parse_player_text_action_plan
 from random_imitator_td.game.zombie_behaviors import POLE_VAULTING_SPENT_STATUS
-from random_imitator_td.game.models import PendingImitator, PlantInstance, RevealResultDef, ZombieInstance
+from random_imitator_td.game.models import AirdropInstance, PendingImitator, PlantInstance, RevealResultDef, ZombieInstance
 from random_imitator_td.players.scripted_player import ScriptedPlayer
 from scripts.sim_balance import PressureScriptedPlayer, build_wave_schedule, config_for_level
 
@@ -374,6 +374,79 @@ class ImitatorPvzP2Tests(unittest.TestCase):
         self.assertEqual(result["executed_actions"][0]["card_id"], "peashooter")
         self.assertIn("豌豆射手x1(100)", observation["player_view"]["text"])
 
+    def test_roof_flower_pot_becomes_buffer_for_direct_plant(self) -> None:
+        config = GameConfig(is_roof=True, card_slot_count=2, card_loadout=("flower_pot", "peashooter"))
+        engine = GameEngine(config=config, wave_schedule=[])
+        observation = engine.run_until_decision()
+
+        result = engine.apply_action_plan(
+            {
+                "schema_version": 1,
+                "observation_id": observation["observation_id"],
+                "action_plan_id": "plan_roof_pot_buffer",
+                "interrupt_policy": "interrupt_on_emergency",
+                "actions": [
+                    {"action": "plant_card", "slot_id": "flower_pot_1", "lane": 3, "col": 3},
+                    {"action": "plant_card", "slot_id": "peashooter_1", "lane": 3, "col": 3},
+                ],
+            },
+            observation_id=observation["observation_id"],
+        )
+
+        plant = engine.state.plants[engine.state.grid[(3, 3)]]
+        self.assertTrue(result["accepted"])
+        self.assertEqual(plant.plant_id, "peashooter")
+        self.assertIn("roof_pot", plant.status.split(","))
+        self.assertFalse([item for item in engine.state.plants.values() if item.plant_id == "flower_pot"])
+        planted_event = [event for event in result["events"] if event["type"] == "plant_card_planted"][-1]
+        self.assertTrue(planted_event["roof_pot"])
+        self.assertIn("盆豌", result["observation"]["player_view"]["text"])
+        self.assertIn("花盆缓冲", result["observation"]["player_view"]["text"])
+
+    def test_roof_pot_buffer_absorbs_first_zombie_bite(self) -> None:
+        engine = GameEngine(config=GameConfig(is_roof=True), wave_schedule=[])
+        engine.state.tick = 10
+        plant = PlantInstance("p1", "peashooter", lane=3, col=3, hp=100, status="active,roof_pot")
+        zombie = ZombieInstance("z1", "normal", lane=3, x=3.0, hp=200, spawned_tick=0, target_entity_id="p1")
+        engine.state.plants[plant.entity_id] = plant
+        engine.state.grid[(3, 3)] = plant.entity_id
+        engine.state.zombies[zombie.entity_id] = zombie
+
+        events = engine._zombie_bite()
+
+        self.assertEqual(plant.hp, 100)
+        self.assertNotIn("roof_pot", plant.status.split(","))
+        self.assertIn("roof_pot_absorbed_hit", [event.type for event in events])
+
+    def test_roof_tile_can_damage_zombie_and_destroy_it(self) -> None:
+        config = GameConfig(is_roof=True, roof_tile_damage=999)
+        engine = GameEngine(config=config, wave_schedule=[])
+        zombie = ZombieInstance("z1", "normal", lane=2, x=4.1, hp=200, spawned_tick=0)
+        engine.state.zombies[zombie.entity_id] = zombie
+
+        events = engine._apply_roof_tile(2, 4)
+
+        self.assertNotIn("z1", engine.state.zombies)
+        self.assertEqual(events[0].type, "roof_tile_slipped")
+        self.assertEqual(events[0].payload["target_kind"], "zombie")
+        self.assertTrue(events[0].payload["destroyed"])
+        self.assertIn("zombie_died", [event.type for event in events])
+
+    def test_roof_tile_is_absorbed_by_roof_pot_buffer(self) -> None:
+        config = GameConfig(is_roof=True, roof_tile_damage=999)
+        engine = GameEngine(config=config, wave_schedule=[])
+        plant = PlantInstance("p1", "peashooter", lane=2, col=4, hp=100, status="active,roof_pot")
+        engine.state.plants[plant.entity_id] = plant
+        engine.state.grid[(2, 4)] = plant.entity_id
+
+        events = engine._apply_roof_tile(2, 4)
+
+        self.assertIn("p1", engine.state.plants)
+        self.assertEqual(plant.hp, 100)
+        self.assertNotIn("roof_pot", plant.status.split(","))
+        self.assertEqual(events[0].type, "roof_tile_slipped")
+        self.assertTrue(events[0].payload["absorbed_by_roof_pot"])
+
     def test_occupied_cell_failure_reports_target_and_occupant(self) -> None:
         config = GameConfig(card_slot_count=2, card_loadout=("sunflower", "wallnut"))
         engine = GameEngine(config=config, wave_schedule=[])
@@ -409,7 +482,7 @@ class ImitatorPvzP2Tests(unittest.TestCase):
         observation = engine.run_until_decision()
 
         self.assertIn("资源: 阳光25", observation["player_view"]["text"])
-        self.assertIn("卡槽: 樱桃炸弹x1(150)", observation["player_view"]["text"])
+        self.assertIn("卡槽: 樱桃炸弹x1(150/阳光不足)", observation["player_view"]["text"])
         self.assertNotIn("缺125", observation["player_view"]["text"])
 
     def test_card_catalog_includes_selection_costs(self) -> None:
@@ -424,6 +497,8 @@ class ImitatorPvzP2Tests(unittest.TestCase):
         self.assertEqual(catalog["imitator"]["cost"], 0)
         self.assertEqual(catalog["coffee_bean"]["cost"], 75)
         self.assertEqual(catalog["sunflower"]["cost"], 50)
+        self.assertEqual(catalog["plantern"]["cost"], 25)
+        self.assertEqual(catalog["flower_pot"]["cost"], 25)
         self.assertEqual(catalog["cherry_bomb"]["cost"], 150)
 
     def test_card_selection_view_renders_catalog_prices(self) -> None:
@@ -433,6 +508,8 @@ class ImitatorPvzP2Tests(unittest.TestCase):
         self.assertIn("槽位6/10", view["text"])
         self.assertIn("模仿者(0)", view["text"])
         self.assertIn("咖啡豆(75)", view["text"])
+        self.assertIn("路灯花(25)", view["text"])
+        self.assertIn("花盆(25)", view["text"])
         self.assertIn("樱桃炸弹(150)", view["text"])
 
     def test_level_stage_config_and_wave_counts_jump_by_level(self) -> None:
@@ -441,10 +518,62 @@ class ImitatorPvzP2Tests(unittest.TestCase):
         self.assertTrue(config_for_level(1, base_config).is_day)
         self.assertFalse(config_for_level(2, base_config).is_day)
         self.assertTrue(config_for_level(3, base_config).is_day)
+        level4_config = config_for_level(4, base_config)
+        self.assertFalse(level4_config.is_day)
+        self.assertEqual(level4_config.fog_start_col, 6)
+        level5_config = config_for_level(5, base_config)
+        self.assertTrue(level5_config.is_day)
+        self.assertTrue(level5_config.is_roof)
+        level6_config = config_for_level(6, base_config)
+        self.assertTrue(level6_config.is_endless)
         self.assertEqual(len(build_wave_schedule(1)), 6)
         self.assertEqual(len(build_wave_schedule(2)), 11)
         self.assertEqual(len(build_wave_schedule(3)), 18)
+        self.assertEqual(len(build_wave_schedule(4)), 28)
+        self.assertEqual(len(build_wave_schedule(5)), 31)
+        self.assertEqual(build_wave_schedule(6), [])
         self.assertLess(max(tick for tick, _, _ in build_wave_schedule(1)), max(tick for tick, _, _ in build_wave_schedule(3)))
+
+    def test_all_imitator_special_level_uses_endless_dynamic_waves(self) -> None:
+        config = config_for_level(6, GameConfig())
+        engine = GameEngine(config=config, seed="endless-dynamic", wave_schedule=build_wave_schedule(6))
+        engine.state.level = 6
+
+        summary = engine.advance_until(max_ticks=120)
+
+        self.assertTrue(engine.config.is_endless)
+        self.assertFalse(engine.state.game_over)
+        self.assertEqual(engine.state.result, None)
+        self.assertEqual(engine.state.wave_state["spawned_count"], 1)
+        self.assertFalse(engine.state.wave_state["completed"])
+        self.assertIn("zombie_spawned", [event["type"] for event in summary["events"]])
+
+    def test_level4_fog_view_hides_and_plantern_reveals_cells(self) -> None:
+        engine = GameEngine(config=config_for_level(4, GameConfig()), wave_schedule=[])
+        engine.state.level = 4
+
+        observation = engine.run_until_decision()
+
+        self.assertIn("Lv4 场地:迷雾夜间", observation["player_view"]["text"])
+        self.assertIn("地形: 迷雾6-9列", observation["player_view"]["text"])
+        self.assertIn("1: 空 空 空 空 空 雾 雾 雾 雾", observation["player_view"]["text"])
+
+        engine.state.zombies["z1"] = ZombieInstance("z1", "normal", lane=3, x=8.2, hp=200)
+        hidden = engine.build_observation(
+            reason=["test"],
+            events=[],
+            advance_summary={"from_tick": 0, "to_tick": 0, "advanced_ticks": 0, "stop_reason": "test"},
+        )
+        self.assertIn("3: 空 空 空 空 空 雾 雾 雾 雾", hidden["player_view"]["text"])
+
+        engine.state.plants["p1"] = PlantInstance("p1", "plantern", lane=3, col=7, hp=300, planted_tick=0)
+        engine.state.grid[(3, 7)] = "p1"
+        revealed = engine.build_observation(
+            reason=["test"],
+            events=[],
+            advance_summary={"from_tick": 0, "to_tick": 0, "advanced_ticks": 0, "stop_reason": "test"},
+        )
+        self.assertIn("3: 空 空 空 空 空 空 灯 普 空", revealed["player_view"]["text"])
 
     def test_observation_and_player_view_include_system_wave_progress(self) -> None:
         engine = GameEngine(wave_schedule=[(10, "normal", 2), (30, "buckethead", 4)])
@@ -1449,7 +1578,7 @@ class ImitatorPvzP2Tests(unittest.TestCase):
         observation = engine.run_until_decision()
 
         plan = parse_player_text_action_plan(
-            "种 模仿者 3-4\n种 豌豆射手 1-2\n种 咖啡豆 2-3\n铲 4-5\n等待",
+            "种 模仿者 3-4\n种 豌豆射手 1-2\n种 咖啡豆 2-3\n开空投 5-6\n铲 4-5\n等待",
             observation=observation,
             action_plan_id="plan_text",
         )
@@ -1461,11 +1590,88 @@ class ImitatorPvzP2Tests(unittest.TestCase):
                 {"action": "plant_imitator", "lane": 3, "col": 4},
                 {"action": "plant_card", "lane": 1, "col": 2, "slot_id": "peashooter_1"},
                 {"action": "plant_card", "lane": 2, "col": 3, "slot_id": "coffee_bean_1"},
+                {"action": "open_airdrop", "lane": 5, "col": 6},
                 {"action": "shovel_plant", "lane": 4, "col": 5},
                 {"action": "wait", "max_wait_ticks": 80},
             ],
         )
         validate_action_plan(plan, config=config, observation_id=observation["observation_id"])
+
+    def test_airdrop_pool_contains_only_strong_plants_or_zombies(self) -> None:
+        forbidden_plants = {"grave_buster", "lily_pad", "flower_pot", "coffee_bean", "plantern"}
+        for outcome in AIRDROP_OUTCOME_WEIGHTS:
+            self.assertNotEqual(outcome, "empty")
+            self.assertNotIn("zomboss", outcome)
+            self.assertTrue(outcome.startswith("plant_") or outcome.startswith("zombie_"))
+            if outcome.startswith("plant_"):
+                self.assertNotIn(outcome.removeprefix("plant_"), forbidden_plants)
+
+    def test_airdrop_drops_on_empty_cell_occupies_without_blocking(self) -> None:
+        config = GameConfig(
+            enable_airdrops=True,
+            is_endless=True,
+            airdrop_start_tick=1,
+            airdrop_min_interval_ticks=999,
+            airdrop_max_interval_ticks=999,
+        )
+        engine = GameEngine(config=config, wave_schedule=[], seed="airdrop-drop")
+
+        summary = engine.advance_until(max_ticks=1)
+
+        self.assertIn("airdrop_dropped", [event["type"] for event in summary["events"]])
+        self.assertEqual(len(engine.state.airdrops), 1)
+        airdrop = next(iter(engine.state.airdrops.values()))
+        self.assertEqual(engine.state.grid[(airdrop.lane, airdrop.col)], airdrop.entity_id)
+
+        zombie = ZombieInstance("zpass", "normal", lane=airdrop.lane, x=airdrop.col + 0.5, hp=200, spawned_tick=0)
+        engine.state.zombies[zombie.entity_id] = zombie
+        before_x = zombie.x
+        move_events = engine._zombie_move()
+
+        self.assertLess(zombie.x, before_x)
+        self.assertIsNone(zombie.target_entity_id)
+        self.assertNotIn("zombie_started_eating", [event.type for event in move_events])
+
+    def test_airdrop_can_be_opened_by_player_or_passing_zombie(self) -> None:
+        config = GameConfig(enable_airdrops=True, is_endless=True)
+        engine = GameEngine(config=config, wave_schedule=[], seed="airdrop-open")
+        airdrop = AirdropInstance("a1", lane=3, col=4, dropped_tick=0, expires_tick=500)
+        engine.state.airdrops[airdrop.entity_id] = airdrop
+        engine.state.grid[(3, 4)] = airdrop.entity_id
+        observation = engine.run_until_decision()
+        plan = parse_player_text_action_plan("开空投 3-4", observation=observation, action_plan_id="open_airdrop")
+
+        result = engine.apply_action_plan(plan, observation_id=observation["observation_id"])
+
+        event_types = [event["type"] for event in result["events"]]
+        self.assertIn("airdrop_opened", event_types)
+        self.assertFalse(engine.state.airdrops)
+        self.assertNotIn("empty", [event.get("outcome") for event in result["events"]])
+
+        engine = GameEngine(config=config, wave_schedule=[], seed="airdrop-zombie-open")
+        airdrop = AirdropInstance("a2", lane=2, col=5, dropped_tick=0, expires_tick=500)
+        engine.state.airdrops[airdrop.entity_id] = airdrop
+        engine.state.grid[(2, 5)] = airdrop.entity_id
+        engine.state.zombies["z1"] = ZombieInstance("z1", "normal", lane=2, x=5.0, hp=200, spawned_tick=0)
+
+        events = engine.step_one_tick()
+
+        self.assertIn("airdrop_opened", [event.type for event in events])
+        self.assertFalse(engine.state.airdrops)
+
+    def test_airdrop_is_cleared_by_bomb_without_opening(self) -> None:
+        config = GameConfig(enable_airdrops=True, is_endless=True)
+        engine = GameEngine(config=config, wave_schedule=[], seed="airdrop-clear")
+        airdrop = AirdropInstance("a1", lane=3, col=4, dropped_tick=0, expires_tick=500)
+        engine.state.airdrops[airdrop.entity_id] = airdrop
+        engine.state.grid[(3, 4)] = airdrop.entity_id
+
+        events = engine._trigger_jalapeno(3, 1, "cause_event")
+
+        event_types = [event.type for event in events]
+        self.assertIn("airdrop_cleared", event_types)
+        self.assertNotIn("airdrop_opened", event_types)
+        self.assertFalse(engine.state.airdrops)
 
     def test_level_1_has_reproducible_winning_seed_with_tool_delay(self) -> None:
         engine = GameEngine(

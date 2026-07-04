@@ -11,7 +11,7 @@ from .config import GameConfig
 from .contracts import action_failed_result, minimal_observation, normalize_action_plan
 from .events import Event
 from .experience import build_player_experience, build_round_record, build_run_recap as make_run_recap
-from .models import BossEventInstance, GameState, PendingImitator, PlantInstance, RevealResultDef, ZombieInstance, initial_state
+from .models import AirdropInstance, BossEventInstance, GameState, PendingImitator, PlantInstance, RevealResultDef, ZombieInstance, initial_state
 from .player_view import build_player_view
 from . import plant_behaviors, zombie_behaviors
 from .randomizer import ReplayRng
@@ -53,6 +53,56 @@ EARLY_REVEAL_CLUSTER_PRESSURE_WEIGHT_CAPS = {
     "chaos_zomboni_zombie": 0,
     "chaos_zomboss": 0,
 }
+ROOF_POT_STATUS = "roof_pot"
+ROOF_POT_ZOMBIE_REVEAL_X_BONUS = 0.7
+ENDLESS_ZOMBIE_TIERS: tuple[tuple[int, tuple[tuple[str, int], ...]], ...] = (
+    (0, (("normal", 6), ("conehead", 2), ("newspaper", 1))),
+    (8, (("normal", 5), ("conehead", 3), ("newspaper", 2), ("buckethead", 1), ("pole_vaulting", 1))),
+    (18, (("normal", 4), ("conehead", 3), ("newspaper", 2), ("buckethead", 2), ("screen_door", 1), ("jack_in_the_box", 1))),
+    (32, (("conehead", 3), ("buckethead", 3), ("newspaper", 2), ("pole_vaulting", 2), ("dancing", 1), ("ladder", 1), ("pogo", 1))),
+    (50, (("buckethead", 3), ("football", 2), ("jack_in_the_box", 2), ("dancing", 2), ("balloon", 1), ("catapult", 1), ("gargantuar", 1))),
+)
+ENDLESS_LANE_WEIGHTS = {"1": 1, "2": 2, "3": 2, "4": 2, "5": 1}
+AIRDROP_OUTCOME_WEIGHTS = {
+    "plant_wallnut": 5,
+    "plant_tallnut": 3,
+    "plant_snow_pea": 4,
+    "plant_repeater": 3,
+    "plant_threepeater": 3,
+    "plant_cactus": 3,
+    "plant_starfruit": 3,
+    "plant_chomper": 2,
+    "plant_squash": 3,
+    "plant_cherry_bomb": 3,
+    "plant_jalapeno": 3,
+    "zombie_normal": 8,
+    "zombie_conehead": 7,
+    "zombie_newspaper": 4,
+    "zombie_buckethead": 5,
+    "zombie_pole_vaulting": 3,
+    "zombie_jack_in_the_box": 2,
+    "zombie_football": 1,
+}
+
+
+def _status_tags(status: str) -> set[str]:
+    return {tag for tag in status.split(",") if tag}
+
+
+def _has_status(status: str, tag: str) -> bool:
+    return tag in _status_tags(status)
+
+
+def _with_status(status: str, tag: str) -> str:
+    tags = _status_tags(status) | {tag}
+    return ",".join(sorted(tags)) if tags else "active"
+
+
+def _without_status(status: str, tag: str) -> str:
+    tags = _status_tags(status)
+    tags.discard(tag)
+    return ",".join(sorted(tags)) if tags else "active"
+
 
 def cell_block_threshold(col: int) -> float:
     return col + 0.5
@@ -111,7 +161,11 @@ def place_pending_imitator(state: GameState, imitator: PendingImitator) -> Event
         phase="scheduled_actions",
         type="imitator_planted",
         severity="normal",
-        payload={"lane": imitator.lane, "col": imitator.col},
+        payload={
+            "lane": imitator.lane,
+            "col": imitator.col,
+            "roof_pot": _has_status(imitator.status, ROOF_POT_STATUS),
+        },
         source_id=imitator.entity_id,
     )
 
@@ -241,7 +295,24 @@ class GameEngine:
                 (self.config.first_wave_start_tick + 160, "conehead", 4),
             ]
         )
-        self.state.wave_state = {"spawned_count": 0, "total": len(self.wave_schedule), "completed": False}
+        if self.config.is_endless:
+            self.state.wave_state = {
+                "spawned_count": 0,
+            "total": None,
+            "completed": False,
+            "next_spawn_tick": self.config.endless_wave_start_tick,
+        }
+        else:
+            self.state.wave_state = {"spawned_count": 0, "total": len(self.wave_schedule), "completed": False}
+        if self.config.enable_airdrops:
+            self.state.wave_state.update(
+                {
+                    "next_airdrop_tick": self.config.airdrop_start_tick,
+                    "airdrops_spawned": 0,
+                    "airdrops_opened": 0,
+                    "airdrops_cleared": 0,
+                }
+            )
         self.event_log: list[Event] = []
         self._entity_counter = 0
         self._event_counter = 0
@@ -259,6 +330,7 @@ class GameEngine:
             | set(self.state.pending_imitators)
             | set(self.state.zombies)
             | set(self.state.boss_events)
+            | set(self.state.airdrops)
         )
         occupied_ids.update(event.source_id for event in self.event_log if event.source_id is not None)
         while True:
@@ -343,11 +415,13 @@ class GameEngine:
         self.state.tick += 1
         events: list[Event] = []
         events.extend(self._reveal_due_imitators())
+        events.extend(self._roof_tile_status())
         events.extend(self._plant_status())
         events.extend(self._plant_attack())
         events.extend(self._zombie_status())
         events.extend(self._boss_event_status())
         events.extend(self._zombie_move())
+        events.extend(self._airdrop_status())
         events.extend(self._zombie_bite())
         events.extend(self._resolve_home_entries())
         events.extend(self._wave_spawn())
@@ -444,6 +518,26 @@ class GameEngine:
                     )
                 executed_actions.append({"action_index": index, **action})
                 collected.extend(self._events_from_summary(self.advance_until(max_ticks=self.config.shovel_action_ticks, stop_on_event=False)))
+                if self.state.game_over:
+                    completion_stop_reason = f"action_{self.state.result or 'game_over'}"
+                    break
+                continue
+
+            if action["action"] == "open_airdrop":
+                reason = self._open_airdrop_action(action["lane"], action["col"], collected)
+                if reason is not None:
+                    return self._failed_action(
+                        action_plan,
+                        index,
+                        action,
+                        reason,
+                        collected,
+                        start_tick=start_tick,
+                        real_elapsed_seconds=real_elapsed_seconds,
+                        executed_actions=executed_actions,
+                    )
+                executed_actions.append({"action_index": index, **action})
+                collected.extend(self._events_from_summary(self.advance_until(max_ticks=self.config.airdrop_open_action_ticks, stop_on_event=False)))
                 if self.state.game_over:
                     completion_stop_reason = f"action_{self.state.result or 'game_over'}"
                     break
@@ -613,6 +707,8 @@ class GameEngine:
                 observation["valid_actions"].insert(0, "plant_card")
             if any(entity_id in self.state.plants or entity_id in self.state.pending_imitators for entity_id in self.state.grid.values() if entity_id is not None):
                 observation["valid_actions"].insert(0, "shovel_plant")
+            if self.state.airdrops:
+                observation["valid_actions"].insert(0, "open_airdrop")
         observation["action_constraints"] = {
             "imitator_cost": self.config.imitator_cost,
             "card_costs": {
@@ -628,6 +724,7 @@ class GameEngine:
             "card_slot_count": card_slot_count,
             "max_card_slot_count": self.config.max_card_slot_count,
             "card_slots": card_slots,
+            "airdrops": self._airdrop_observations(),
             "card_catalog": build_card_catalog(self.config),
             "plant_action_ticks": self.config.plant_action_ticks,
             "shovel_action_ticks": self.config.shovel_action_ticks,
@@ -701,10 +798,17 @@ class GameEngine:
             return "cooldown_not_ready"
         if not self.config.is_valid_cell(lane, col):
             return "target_out_of_bounds"
-        if self.state.grid[(lane, col)] is not None:
-            return "target_cell_no_longer_empty"
 
         plant_def = self.plant_defs[card_id]
+        water_reason = self._direct_plant_water_failure_reason(lane, plant_def)
+        if water_reason is not None:
+            return water_reason
+        roof_pot = False
+        if self.state.grid[(lane, col)] is not None:
+            if card_id != "flower_pot":
+                roof_pot = self._take_roof_pot_platform(lane, col)
+            if not roof_pot:
+                return "target_cell_no_longer_empty"
         self.state.sun -= self._card_cost(card_id)
         self.state.cooldowns[slot_id] = self.state.tick + self._card_cooldown_ticks(card_id)
         if self._should_trigger_instant_plant(plant_def):
@@ -712,7 +816,7 @@ class GameEngine:
                 "scheduled_actions",
                 "plant_card_played",
                 "normal",
-                {"lane": lane, "col": col, "card_id": card_id, "slot_id": slot_id},
+                {"lane": lane, "col": col, "card_id": card_id, "slot_id": slot_id, "roof_pot": roof_pot},
             )
             collected.append(trigger_event)
             collected.extend(self._trigger_instant_plant_id(card_id, lane, col, trigger_event.event_id))
@@ -726,6 +830,7 @@ class GameEngine:
             col=col,
             hp=plant_def.hp,
             next_attack_tick=self._initial_next_attack_tick(card_id, plant_def),
+            status=_with_status("active", ROOF_POT_STATUS) if roof_pot else "active",
             planted_tick=self.state.tick,
         )
         self.state.plants[entity_id] = plant
@@ -735,7 +840,7 @@ class GameEngine:
                 "scheduled_actions",
                 "plant_card_planted",
                 "normal",
-                {"lane": lane, "col": col, "plant_id": card_id, "slot_id": slot_id},
+                {"lane": lane, "col": col, "plant_id": card_id, "slot_id": slot_id, "roof_pot": roof_pot},
                 source_id=entity_id,
             )
         )
@@ -800,8 +905,11 @@ class GameEngine:
             return "cooldown_not_ready"
         if not self.config.is_valid_cell(lane, col):
             return "target_out_of_bounds"
+        roof_pot = False
         if self.state.grid[(lane, col)] is not None:
-            return "target_cell_no_longer_empty"
+            roof_pot = self._take_roof_pot_platform(lane, col)
+            if not roof_pot:
+                return "target_cell_no_longer_empty"
         entity_id = self._next_entity_id("i")
         imitator = PendingImitator(
             entity_id=entity_id,
@@ -810,6 +918,7 @@ class GameEngine:
             hp=300,
             planted_tick=self.state.tick,
             reveal_tick=self.state.tick + self.config.reveal_delay_ticks,
+            status=_with_status("active", ROOF_POT_STATUS) if roof_pot else "active",
         )
         event = place_pending_imitator(self.state, imitator)
         event.payload["slot_id"] = slot_id
@@ -820,6 +929,15 @@ class GameEngine:
         self.state.scheduled_events.append(
             {"type": "imitator_reveal", "entity_id": entity_id, "tick": imitator.reveal_tick}
         )
+        return None
+
+    def _direct_plant_water_failure_reason(self, lane: int, plant_def: Any) -> str | None:
+        water_compatible = plant_behaviors.has_special(plant_def, "water_plant") or plant_behaviors.has_special(plant_def, "water_platform")
+        if self.config.is_water_lane(lane):
+            if not water_compatible:
+                return "water_lane_requires_imitator_or_water_plant"
+        elif water_compatible:
+            return "requires_water_lane"
         return None
 
     def _plant_coffee_bean(self, lane: int, col: int, collected: list[Event], *, slot_id: str) -> str | None:
@@ -840,6 +958,81 @@ class GameEngine:
         self.state.cooldowns[slot_id] = self.state.tick + self._card_cooldown_ticks("coffee_bean")
         return None
 
+    def _take_roof_pot_platform(self, lane: int, col: int) -> bool:
+        if not self.config.is_roof:
+            return False
+        entity_id = self.state.grid.get((lane, col))
+        if entity_id is None:
+            return False
+        plant = self.state.plants.get(entity_id)
+        if plant is None or plant.plant_id != "flower_pot":
+            return False
+        self.state.plants.pop(entity_id, None)
+        self.state.grid[(lane, col)] = None
+        return True
+
+    def _remove_roof_pot_from_plant(self, plant: PlantInstance) -> bool:
+        if not self.config.is_roof or not _has_status(plant.status, ROOF_POT_STATUS):
+            return False
+        plant.status = _without_status(plant.status, ROOF_POT_STATUS)
+        return True
+
+    def _remove_roof_pot_from_imitator(self, imitator: PendingImitator) -> bool:
+        if not self.config.is_roof or not _has_status(imitator.status, ROOF_POT_STATUS):
+            return False
+        imitator.status = _without_status(imitator.status, ROOF_POT_STATUS)
+        return True
+
+    def _consume_roof_pot_on_plant(
+        self,
+        plant: PlantInstance,
+        *,
+        phase: str,
+        reason: str,
+        source_id: str | None = None,
+    ) -> Event | None:
+        if not self._remove_roof_pot_from_plant(plant):
+            return None
+        return self._event(
+            phase,
+            "roof_pot_absorbed_hit",
+            "strong",
+            {
+                "lane": plant.lane,
+                "col": plant.col,
+                "target_kind": "plant",
+                "target_id": plant.entity_id,
+                "target_type": plant.plant_id,
+                "reason": reason,
+            },
+            source_id=source_id,
+        )
+
+    def _consume_roof_pot_on_imitator(
+        self,
+        imitator: PendingImitator,
+        *,
+        phase: str,
+        reason: str,
+        source_id: str | None = None,
+    ) -> Event | None:
+        if not self._remove_roof_pot_from_imitator(imitator):
+            return None
+        return self._event(
+            phase,
+            "roof_pot_absorbed_hit",
+            "strong",
+            {
+                "lane": imitator.lane,
+                "col": imitator.col,
+                "target_kind": "pending_imitator",
+                "target_id": imitator.entity_id,
+                "target_type": "imitator",
+                "reason": reason,
+            },
+            source_id=source_id,
+        )
+
     def _card_slot_observations(self) -> list[dict[str, Any]]:
         return [
             {
@@ -849,6 +1042,18 @@ class GameEngine:
                 "ready": ready_tick <= self.state.tick,
             }
             for slot_id, ready_tick in sorted(self.state.cooldowns.items(), key=lambda item: self._card_slot_sort_key(item[0]))
+        ]
+
+    def _airdrop_observations(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "airdrop_id": airdrop.entity_id,
+                "lane": airdrop.lane,
+                "col": airdrop.col,
+                "expires_in_ticks": max(0, airdrop.expires_tick - self.state.tick),
+                "status": airdrop.status,
+            }
+            for airdrop in sorted(self.state.airdrops.values(), key=lambda item: (item.lane, item.col, item.entity_id))
         ]
 
     def _resolve_plant_card_slot(self, action: dict[str, Any], *, allowed_card_ids: set[str] | None = None) -> str | None:
@@ -888,6 +1093,20 @@ class GameEngine:
         return (slot_id, 0)
 
     def _wave_progress_observation(self) -> dict[str, Any]:
+        if self.config.is_endless:
+            spawned = int(self.state.wave_state.get("spawned_count", 0) or 0)
+            next_tick = int(self.state.wave_state.get("next_spawn_tick", self.config.endless_wave_start_tick) or self.config.endless_wave_start_tick)
+            return {
+                "spawned": spawned,
+                "total": None,
+                "completed": False,
+                "remaining": None,
+                "endless": True,
+                "next": {
+                    "tick": next_tick,
+                    "in_ticks": max(0, next_tick - self.state.tick),
+                },
+            }
         total = int(self.state.wave_state.get("total", len(self.wave_schedule)) or 0)
         spawned = min(total, int(self.state.wave_state.get("spawned_count", 0) or 0))
         completed = bool(self.state.wave_state.get("completed")) or (total > 0 and spawned >= total)
@@ -967,6 +1186,463 @@ class GameEngine:
                 )
         return events
 
+    def _roof_tile_status(self) -> list[Event]:
+        if not self.config.is_roof:
+            return []
+        start_tick = self.config.roof_tile_event_start_tick
+        interval = self.config.roof_tile_event_interval_ticks
+        if interval <= 0 or self.state.tick < start_tick:
+            return []
+        if (self.state.tick - start_tick) % interval != 0:
+            return []
+
+        lane_pool = [str(lane) for lane in self.config.lanes_range()]
+        col_pool = [str(col) for col in self.config.cols_range()]
+        lane_weights = {lane: 1 for lane in lane_pool}
+        col_weights = {col: 1 for col in col_pool}
+        lane = int(
+            self.rng.roll(
+                "roof",
+                "roof_tile_lane",
+                lane_pool,
+                lane_weights,
+                {"level": self.state.level},
+                tick=self.state.tick,
+            )
+        )
+        col = int(
+            self.rng.roll(
+                "roof",
+                "roof_tile_col",
+                col_pool,
+                col_weights,
+                {"level": self.state.level, "lane": lane},
+                tick=self.state.tick,
+            )
+        )
+        return self._apply_roof_tile(lane, col)
+
+    def _apply_roof_tile(self, lane: int, col: int) -> list[Event]:
+        damage = max(0, self.config.roof_tile_damage)
+        target_zombie = self._roof_tile_zombie_target(lane, col)
+        if target_zombie is not None:
+            target_zombie.hp -= damage
+            destroyed = target_zombie.hp <= 0
+            events = [
+                self._event(
+                    "plant_status",
+                    "roof_tile_slipped",
+                    "strong",
+                    {
+                        "lane": lane,
+                        "col": col,
+                        "target_kind": "zombie",
+                        "target_id": target_zombie.entity_id,
+                        "target_type": target_zombie.zombie_id,
+                        "damage": damage,
+                        "target_hp": target_zombie.hp,
+                        "destroyed": destroyed,
+                        "absorbed_by_roof_pot": False,
+                    },
+                    source_id=target_zombie.entity_id,
+                )
+            ]
+            if destroyed:
+                self.state.zombies.pop(target_zombie.entity_id, None)
+                events.append(
+                    self._event(
+                        "plant_status",
+                        "zombie_died",
+                        "strong",
+                        self._zombie_death_payload(target_zombie, killed_by="roof_tile"),
+                        source_id=target_zombie.entity_id,
+                    )
+                )
+            return events
+
+        entity_id = self.state.grid.get((lane, col))
+        if entity_id in self.state.pending_imitators:
+            imitator = self.state.pending_imitators[entity_id]
+            absorbed = self._remove_roof_pot_from_imitator(imitator)
+            destroyed = False
+            if not absorbed:
+                imitator.hp -= damage
+                destroyed = imitator.hp <= 0
+                if destroyed:
+                    self.state.pending_imitators.pop(entity_id, None)
+                    self.state.grid[(lane, col)] = None
+                    self.state.scheduled_events = [
+                        event
+                        for event in self.state.scheduled_events
+                        if event.get("entity_id") != entity_id and event.get("source_id") != entity_id
+                    ]
+            return [
+                self._event(
+                    "plant_status",
+                    "roof_tile_slipped",
+                    "strong",
+                    {
+                        "lane": lane,
+                        "col": col,
+                        "target_kind": "pending_imitator",
+                        "target_id": entity_id,
+                        "target_type": "imitator",
+                        "damage": 0 if absorbed else damage,
+                        "target_hp": imitator.hp,
+                        "destroyed": destroyed,
+                        "reveal_cancelled": destroyed,
+                        "absorbed_by_roof_pot": absorbed,
+                    },
+                    source_id=entity_id,
+                )
+            ]
+
+        if entity_id in self.state.plants:
+            plant = self.state.plants[entity_id]
+            absorbed = self._remove_roof_pot_from_plant(plant)
+            destroyed = False
+            if not absorbed:
+                plant.hp -= damage
+                destroyed = plant.hp <= 0
+                if destroyed:
+                    self.state.plants.pop(entity_id, None)
+                    self.state.grid[(lane, col)] = None
+            return [
+                self._event(
+                    "plant_status",
+                    "roof_tile_slipped",
+                    "strong",
+                    {
+                        "lane": lane,
+                        "col": col,
+                        "target_kind": "plant",
+                        "target_id": entity_id,
+                        "target_type": plant.plant_id,
+                        "damage": 0 if absorbed else damage,
+                        "target_hp": plant.hp,
+                        "destroyed": destroyed,
+                        "absorbed_by_roof_pot": absorbed,
+                    },
+                    source_id=entity_id,
+                )
+            ]
+
+        return [
+            self._event(
+                "plant_status",
+                "roof_tile_slipped",
+                "normal",
+                {
+                    "lane": lane,
+                    "col": col,
+                    "target_kind": "empty",
+                    "damage": 0,
+                    "destroyed": False,
+                    "absorbed_by_roof_pot": False,
+                },
+            )
+        ]
+
+    def _roof_tile_zombie_target(self, lane: int, col: int) -> ZombieInstance | None:
+        candidates = [
+            zombie
+            for zombie in self.state.zombies.values()
+            if zombie.lane == lane and min(self.config.cols, max(1, int(zombie.x + 0.5))) == col
+        ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda zombie: (abs(zombie.x - col), zombie.entity_id))
+
+    def _airdrop_status(self) -> list[Event]:
+        if not self.config.enable_airdrops:
+            return []
+        self._ensure_airdrop_schedule()
+        events: list[Event] = []
+
+        for airdrop in list(self.state.airdrops.values()):
+            if self.state.tick >= airdrop.expires_tick:
+                self._remove_airdrop(airdrop.entity_id)
+                self._schedule_next_airdrop()
+                events.append(
+                    self._event(
+                        "scheduler",
+                        "airdrop_expired",
+                        "normal",
+                        {"lane": airdrop.lane, "col": airdrop.col, "airdrop_id": airdrop.entity_id},
+                        source_id=airdrop.entity_id,
+                    )
+                )
+
+        for airdrop in list(self.state.airdrops.values()):
+            opener = self._airdrop_zombie_opener(airdrop)
+            if opener is None:
+                continue
+            events.extend(self._open_airdrop(airdrop, opener="zombie", opener_id=opener.entity_id))
+
+        next_tick = int(self.state.wave_state.get("next_airdrop_tick", self.config.airdrop_start_tick) or self.config.airdrop_start_tick)
+        if self._active_airdrop_count() < max(1, self.config.max_active_airdrops) and self.state.tick >= next_tick:
+            drop_event = self._drop_airdrop()
+            if drop_event is not None:
+                events.append(drop_event)
+            else:
+                self._schedule_next_airdrop()
+                events.append(
+                    self._event(
+                        "scheduler",
+                        "airdrop_expired",
+                        "normal",
+                        {
+                            "lane": None,
+                            "col": None,
+                            "airdrop_id": None,
+                            "reason": "no_empty_cell",
+                            "flavor_text": "空投没有找到空位，飞走了。",
+                        },
+                    )
+                )
+        return events
+
+    def _ensure_airdrop_schedule(self) -> None:
+        if "next_airdrop_tick" not in self.state.wave_state:
+            self.state.wave_state["next_airdrop_tick"] = self.state.tick + max(1, self.config.airdrop_start_tick)
+        self.state.wave_state.setdefault("airdrops_spawned", 0)
+        self.state.wave_state.setdefault("airdrops_opened", 0)
+        self.state.wave_state.setdefault("airdrops_cleared", 0)
+
+    def _active_airdrop_count(self) -> int:
+        return len(self.state.airdrops)
+
+    def _drop_airdrop(self) -> Event | None:
+        cell = self._roll_airdrop_cell()
+        if cell is None:
+            return None
+        lane, col = cell
+        entity_id = self._next_entity_id("a")
+        airdrop = AirdropInstance(
+            entity_id=entity_id,
+            lane=lane,
+            col=col,
+            dropped_tick=self.state.tick,
+            expires_tick=self.state.tick + max(1, self.config.airdrop_ttl_ticks),
+        )
+        self.state.airdrops[entity_id] = airdrop
+        self.state.grid[(lane, col)] = entity_id
+        self.state.wave_state["airdrops_spawned"] = int(self.state.wave_state.get("airdrops_spawned", 0) or 0) + 1
+        self._schedule_next_airdrop()
+        return self._event(
+            "scheduler",
+            "airdrop_dropped",
+            "strong",
+            {
+                "lane": lane,
+                "col": col,
+                "airdrop_id": entity_id,
+                "expires_tick": airdrop.expires_tick,
+                "expires_in_ticks": max(0, airdrop.expires_tick - self.state.tick),
+            },
+            source_id=entity_id,
+        )
+
+    def _roll_airdrop_cell(self) -> tuple[int, int] | None:
+        min_col = max(1, min(self.config.airdrop_min_col, self.config.cols))
+        max_col = max(min_col, min(self.config.airdrop_max_col, self.config.cols))
+        zombie_cells = {(zombie.lane, self._zombie_grid_col(zombie)) for zombie in self.state.zombies.values()}
+        cells = [
+            (lane, col)
+            for lane in self.config.lanes_range()
+            for col in range(min_col, max_col + 1)
+            if self.state.grid[(lane, col)] is None and (lane, col) not in zombie_cells
+        ]
+        if not cells:
+            return None
+        labels = [f"{lane}-{col}" for lane, col in cells]
+        weights = {label: 2 if label.split("-", 1)[0] in {"2", "3", "4"} else 1 for label in labels}
+        selected = self.rng.roll(
+            "airdrop",
+            "drop_cell",
+            labels,
+            weights,
+            {"active_airdrops": len(self.state.airdrops), "level": self.state.level},
+            tick=self.state.tick,
+        )
+        lane_text, col_text = selected.split("-", 1)
+        return int(lane_text), int(col_text)
+
+    def _schedule_next_airdrop(self) -> None:
+        minimum = max(1, self.config.airdrop_min_interval_ticks)
+        maximum = max(minimum, self.config.airdrop_max_interval_ticks)
+        step = 20
+        options = list(range(minimum, maximum + 1, step))
+        if options[-1] != maximum:
+            options.append(maximum)
+        labels = [str(item) for item in options]
+        interval = int(
+            self.rng.roll(
+                "airdrop",
+                "next_interval",
+                labels,
+                {label: 1 for label in labels},
+                {"spawned": int(self.state.wave_state.get("airdrops_spawned", 0) or 0)},
+                tick=self.state.tick,
+            )
+        )
+        self.state.wave_state["next_airdrop_tick"] = self.state.tick + interval
+
+    def _airdrop_zombie_opener(self, airdrop: AirdropInstance) -> ZombieInstance | None:
+        candidates = [
+            zombie
+            for zombie in self.state.zombies.values()
+            if zombie.lane == airdrop.lane and self._zombie_grid_col(zombie) == airdrop.col
+        ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda zombie: (abs(zombie.x - airdrop.col), zombie.entity_id))
+
+    def _zombie_grid_col(self, zombie: ZombieInstance) -> int:
+        return min(self.config.cols, max(1, int(zombie.x + 0.5)))
+
+    def _open_airdrop_action(self, lane: int, col: int, collected: list[Event]) -> str | None:
+        if not self.config.is_valid_cell(lane, col):
+            return "target_out_of_bounds"
+        entity_id = self.state.grid.get((lane, col))
+        if entity_id not in self.state.airdrops:
+            return "target_airdrop_missing"
+        collected.extend(self._open_airdrop(self.state.airdrops[entity_id], opener="player"))
+        return None
+
+    def _open_airdrop(
+        self,
+        airdrop: AirdropInstance,
+        *,
+        opener: str,
+        opener_id: str | None = None,
+    ) -> list[Event]:
+        if airdrop.entity_id not in self.state.airdrops:
+            return []
+        outcome = self.rng.roll(
+            "airdrop",
+            "open_outcome",
+            list(AIRDROP_OUTCOME_WEIGHTS),
+            AIRDROP_OUTCOME_WEIGHTS,
+            {"opener": opener, "lane": airdrop.lane, "col": airdrop.col},
+            tick=self.state.tick,
+        )
+        self._remove_airdrop(airdrop.entity_id)
+        self.state.wave_state["airdrops_opened"] = int(self.state.wave_state.get("airdrops_opened", 0) or 0) + 1
+        self._schedule_next_airdrop()
+        opened_event = self._event(
+            "scheduler",
+            "airdrop_opened",
+            "strong",
+            {
+                "lane": airdrop.lane,
+                "col": airdrop.col,
+                "airdrop_id": airdrop.entity_id,
+                "opener": opener,
+                "opener_id": opener_id,
+                "outcome": outcome,
+                "outcome_kind": "plant" if outcome.startswith("plant_") else "zombie",
+                "flavor_text": self._airdrop_flavor_text(outcome, opener=opener),
+            },
+            source_id=airdrop.entity_id,
+        )
+        events = [opened_event]
+        if outcome.startswith("plant_"):
+            plant_id = outcome.removeprefix("plant_")
+            events.extend(self._spawn_airdrop_plant(plant_id, airdrop.lane, airdrop.col, opened_event.event_id))
+        elif outcome.startswith("zombie_"):
+            zombie_id = outcome.removeprefix("zombie_")
+            events.append(self._spawn_zombie(zombie_id, airdrop.lane, x=airdrop.col + 0.5, source="special"))
+        return events
+
+    def _spawn_airdrop_plant(self, plant_id: str, lane: int, col: int, cause_event_id: str) -> list[Event]:
+        plant_def = self.plant_defs[plant_id]
+        if self._should_trigger_instant_plant(plant_def):
+            return self._trigger_instant_plant_id(plant_id, lane, col, cause_event_id)
+        if self.state.grid[(lane, col)] is not None:
+            return []
+        entity_id = self._next_entity_id("p")
+        plant = PlantInstance(
+            entity_id=entity_id,
+            plant_id=plant_id,
+            lane=lane,
+            col=col,
+            hp=plant_def.hp,
+            next_attack_tick=self._initial_next_attack_tick(plant_id, plant_def),
+            status="active",
+            planted_tick=self.state.tick,
+        )
+        self.state.plants[entity_id] = plant
+        self.state.grid[(lane, col)] = entity_id
+        return [
+            self._event(
+                "reveal",
+                "reveal_spawned_plant",
+                "strong",
+                {"lane": lane, "col": col, "plant_id": plant_id, "source": "airdrop", "roof_pot": False},
+                source_id=entity_id,
+                cause_event_ids=[cause_event_id],
+            )
+        ]
+
+    def _airdrop_flavor_text(self, outcome: str, *, opener: str) -> str:
+        opener_text = "僵尸顺路打开了空投" if opener == "zombie" else "空投打开"
+        if outcome.startswith("plant_"):
+            plant_id = outcome.removeprefix("plant_")
+            return f"{opener_text}: 掉出{self._plant_display_name(plant_id)}。"
+        if outcome.startswith("zombie_"):
+            zombie_id = outcome.removeprefix("zombie_")
+            return f"{opener_text}: 里面钻出{self._zombie_display_name(zombie_id)}。"
+        return opener_text
+
+    def _plant_display_name(self, plant_id: str) -> str:
+        from .player_view import PLANT_NAMES
+
+        return PLANT_NAMES.get(plant_id, plant_id)
+
+    def _zombie_display_name(self, zombie_id: str) -> str:
+        from .player_view import ZOMBIE_NAMES
+
+        return ZOMBIE_NAMES.get(zombie_id, zombie_id)
+
+    def _remove_airdrop(self, entity_id: str) -> AirdropInstance | None:
+        airdrop = self.state.airdrops.pop(entity_id, None)
+        if airdrop is not None and self.state.grid.get((airdrop.lane, airdrop.col)) == entity_id:
+            self.state.grid[(airdrop.lane, airdrop.col)] = None
+        return airdrop
+
+    def _clear_airdrops_matching(
+        self,
+        predicate: Any,
+        *,
+        cause_event_id: str,
+        reason: str,
+    ) -> list[Event]:
+        events: list[Event] = []
+        for airdrop in list(self.state.airdrops.values()):
+            if not predicate(airdrop):
+                continue
+            self._remove_airdrop(airdrop.entity_id)
+            self.state.wave_state["airdrops_cleared"] = int(self.state.wave_state.get("airdrops_cleared", 0) or 0) + 1
+            self._schedule_next_airdrop()
+            events.append(
+                self._event(
+                    "plant_attack",
+                    "airdrop_cleared",
+                    "strong",
+                    {
+                        "lane": airdrop.lane,
+                        "col": airdrop.col,
+                        "airdrop_id": airdrop.entity_id,
+                        "reason": reason,
+                        "opened": False,
+                    },
+                    source_id=airdrop.entity_id,
+                    cause_event_ids=[cause_event_id],
+                )
+            )
+        return events
+
     def _spawn_boss_event(self, result: RevealResultDef, cause_event_id: str) -> Event:
         entity_id = self._next_entity_id("boss")
         duration_ticks = int(result.payload.get("duration_ticks", 240))
@@ -1042,6 +1718,8 @@ class GameEngine:
 
     def _reveal_zombie_spawn_x(self, imitator: PendingImitator) -> float:
         x = imitator.col + 0.5
+        if self.config.is_roof and _has_status(imitator.status, ROOF_POT_STATUS):
+            x = min(self.config.spawn_x, x + ROOF_POT_ZOMBIE_REVEAL_X_BONUS)
         if self.state.level <= EARLY_REVEAL_RELIEF_MAX_LEVEL and self.state.tick < EARLY_REVEAL_RELIEF_UNTIL_TICK:
             return max(x, EARLY_REVEAL_HOME_BUFFER_MIN_X)
         return x
@@ -1061,6 +1739,7 @@ class GameEngine:
         if self._should_trigger_instant_plant(plant_def):
             return self._trigger_instant_plant_id(plant_id, imitator.lane, imitator.col, cause_event_id)
         entity_id = self._next_entity_id("p")
+        roof_pot = _has_status(imitator.status, ROOF_POT_STATUS)
         plant = PlantInstance(
             entity_id=entity_id,
             plant_id=plant_id,
@@ -1068,6 +1747,7 @@ class GameEngine:
             col=imitator.col,
             hp=plant_def.hp,
             next_attack_tick=self._initial_next_attack_tick(plant_id, plant_def),
+            status=_with_status("active", ROOF_POT_STATUS) if roof_pot else "active",
             planted_tick=self.state.tick,
         )
         self.state.plants[entity_id] = plant
@@ -1077,7 +1757,7 @@ class GameEngine:
                 "reveal",
                 "reveal_spawned_plant",
                 "strong" if plant_id in {"wallnut", "peashooter"} else "normal",
-                {"lane": plant.lane, "col": plant.col, "plant_id": plant_id},
+                {"lane": plant.lane, "col": plant.col, "plant_id": plant_id, "roof_pot": roof_pot},
                 source_id=entity_id,
                 cause_event_ids=[cause_event_id],
             )
@@ -1174,7 +1854,7 @@ class GameEngine:
             if abs(zombie.lane - lane) <= 1 and abs(zombie.x - col) <= 1.5:
                 killed.append(zombie_id)
                 del self.state.zombies[zombie_id]
-        return [
+        events = [
             self._event(
                 "plant_attack",
                 "plant_triggered",
@@ -1183,6 +1863,14 @@ class GameEngine:
                 cause_event_ids=[cause_event_id],
             )
         ]
+        events.extend(
+            self._clear_airdrops_matching(
+                lambda airdrop: abs(airdrop.lane - lane) <= 1 and abs(airdrop.col - col) <= 1,
+                cause_event_id=cause_event_id,
+                reason="cherry_bomb",
+            )
+        )
+        return events
 
     def _trigger_jalapeno(self, lane: int, col: int, cause_event_id: str) -> list[Event]:
         killed: list[str] = []
@@ -1195,7 +1883,7 @@ class GameEngine:
             if zombie.hp <= 0:
                 killed.append(zombie_id)
                 del self.state.zombies[zombie_id]
-        return [
+        events = [
             self._event(
                 "plant_attack",
                 "plant_triggered",
@@ -1210,6 +1898,14 @@ class GameEngine:
                 cause_event_ids=[cause_event_id],
             )
         ]
+        events.extend(
+            self._clear_airdrops_matching(
+                lambda airdrop: airdrop.lane == lane,
+                cause_event_id=cause_event_id,
+                reason="jalapeno",
+            )
+        )
+        return events
 
     def _trigger_ice_shroom(self, lane: int, col: int, cause_event_id: str) -> list[Event]:
         frozen_until = self.state.tick + 40
@@ -1247,7 +1943,7 @@ class GameEngine:
             if zombie.hp <= 0:
                 killed.append(zombie_id)
                 del self.state.zombies[zombie_id]
-        return [
+        events = [
             self._event(
                 "plant_attack",
                 "plant_triggered",
@@ -1263,6 +1959,15 @@ class GameEngine:
                 cause_event_ids=[cause_event_id],
             )
         ]
+        events.extend(
+            self._clear_airdrops_matching(
+                lambda airdrop: abs(airdrop.lane - lane) <= plant_behaviors.DOOM_SHROOM_LANE_RADIUS
+                and abs(airdrop.col - col) <= plant_behaviors.DOOM_SHROOM_X_RADIUS,
+                cause_event_id=cause_event_id,
+                reason="doom_shroom",
+            )
+        )
+        return events
 
     def _trigger_blover(self, lane: int, col: int, cause_event_id: str) -> list[Event]:
         blown_zombies: list[str] = []
@@ -1820,6 +2525,15 @@ class GameEngine:
                         source_id=zombie.entity_id,
                     )
                 ]
+            pot_event = self._consume_roof_pot_on_plant(
+                target,
+                phase="zombie_status",
+                reason="bungee",
+                source_id=zombie.entity_id,
+            )
+            if pot_event is not None:
+                self.state.zombies.pop(zombie.entity_id, None)
+                return [pot_event]
             stolen_entity_id = target.entity_id
             stolen_type = target.plant_id
             self.state.plants.pop(target.entity_id, None)
@@ -1858,6 +2572,14 @@ class GameEngine:
                 },
                 source_id=zombie.entity_id,
             )
+        pot_event = self._consume_roof_pot_on_plant(
+            target,
+            phase="zombie_status",
+            reason="catapult",
+            source_id=zombie.entity_id,
+        )
+        if pot_event is not None:
+            return pot_event
         target.hp -= zombie_behaviors.CATAPULT_DAMAGE
         destroyed = target.hp <= 0
         if destroyed:
@@ -2121,6 +2843,8 @@ class GameEngine:
             entity_id = self.state.grid.get((zombie.lane, col))
             if entity_id is None:
                 continue
+            if entity_id in self.state.airdrops:
+                continue
             if self._entity_has_plant_special(entity_id, "non_blocking"):
                 continue
             if col - 0.5 <= zombie.x <= cell_block_threshold(col):
@@ -2146,6 +2870,15 @@ class GameEngine:
             target_id = zombie.target_entity_id
             if target_id in self.state.pending_imitators:
                 imitator = self.state.pending_imitators[target_id]
+                pot_event = self._consume_roof_pot_on_imitator(
+                    imitator,
+                    phase="zombie_bite",
+                    reason="zombie_bite",
+                    source_id=zombie.entity_id,
+                )
+                if pot_event is not None:
+                    events.append(pot_event)
+                    continue
                 imitator.hp -= damage
                 events.append(
                     self._event(
@@ -2163,6 +2896,15 @@ class GameEngine:
                     zombie.target_entity_id = None
             elif target_id in self.state.plants:
                 plant = self.state.plants[target_id]
+                pot_event = self._consume_roof_pot_on_plant(
+                    plant,
+                    phase="zombie_bite",
+                    reason="zombie_bite",
+                    source_id=zombie.entity_id,
+                )
+                if pot_event is not None:
+                    events.append(pot_event)
+                    continue
                 plant.hp -= damage
                 events.append(
                     self._event(
@@ -2201,6 +2943,8 @@ class GameEngine:
         return events
 
     def _wave_spawn(self) -> list[Event]:
+        if self.config.is_endless:
+            return self._endless_wave_spawn()
         events: list[Event] = []
         for tick, zombie_id, lane in self.wave_schedule:
             if tick != self.state.tick:
@@ -2213,6 +2957,55 @@ class GameEngine:
         ):
             self.state.wave_state["completed"] = True
         return events
+
+    def _endless_wave_spawn(self) -> list[Event]:
+        next_tick = int(self.state.wave_state.get("next_spawn_tick", self.config.endless_wave_start_tick) or self.config.endless_wave_start_tick)
+        if "next_spawn_tick" not in self.state.wave_state and self.state.tick > next_tick:
+            next_tick = self.state.tick
+        if self.state.tick < next_tick:
+            return []
+
+        spawned_count = int(self.state.wave_state.get("spawned_count", 0) or 0)
+        zombie_weights = self._endless_zombie_weights(spawned_count)
+        zombie_pool = list(zombie_weights)
+        zombie_id = self.rng.roll(
+            "wave",
+            "endless_wave_zombie",
+            zombie_pool,
+            zombie_weights,
+            {"spawned_count": spawned_count, "level": self.state.level},
+            tick=self.state.tick,
+        )
+        lane_pool = [str(lane) for lane in self.config.lanes_range()]
+        lane_weights = {lane: ENDLESS_LANE_WEIGHTS.get(lane, 1) for lane in lane_pool}
+        lane = int(
+            self.rng.roll(
+                "wave",
+                "endless_wave_lane",
+                lane_pool,
+                lane_weights,
+                {"spawned_count": spawned_count, "zombie_type": zombie_id},
+                tick=self.state.tick,
+            )
+        )
+        event = self._spawn_zombie(zombie_id, lane, x=self.config.spawn_x, source="wave")
+        self.state.wave_state["spawned_count"] = spawned_count + 1
+        self.state.wave_state["total"] = None
+        self.state.wave_state["completed"] = False
+        self.state.wave_state["next_spawn_tick"] = self.state.tick + self._endless_wave_interval(spawned_count + 1)
+        return [event]
+
+    def _endless_zombie_weights(self, spawned_count: int) -> dict[str, int]:
+        selected = ENDLESS_ZOMBIE_TIERS[0][1]
+        for threshold, weights in ENDLESS_ZOMBIE_TIERS:
+            if spawned_count >= threshold:
+                selected = weights
+        return dict(selected)
+
+    def _endless_wave_interval(self, spawned_count: int) -> int:
+        base = max(1, self.config.endless_wave_interval_ticks)
+        pressure_reduction = min(14, spawned_count // 8 * 2)
+        return max(30, base - pressure_reduction)
 
     def _spawn_zombie(self, zombie_id: str, lane: int, *, x: float, source: str) -> Event:
         zombie_def = self.zombie_defs[zombie_id]
@@ -2248,6 +3041,8 @@ class GameEngine:
 
     def _check_win_loss(self) -> list[Event]:
         if self.state.game_over:
+            return []
+        if self.config.is_endless:
             return []
         if (
             self.state.wave_state.get("completed")
@@ -2359,6 +3154,15 @@ class GameEngine:
                     "status": plant.status,
                 }
             ]
+        if entity_id in self.state.airdrops:
+            airdrop = self.state.airdrops[entity_id]
+            return [
+                {
+                    "kind": "airdrop",
+                    "entity_id": entity_id,
+                    "expires_tick": airdrop.expires_tick,
+                }
+            ]
         return [{"kind": "unknown", "entity_id": entity_id}]
 
     def _record_player_round(
@@ -2423,6 +3227,7 @@ class GameEngine:
         lawnmower_available = self.state.lawnmowers.get(lane, False)
         return {
             "lane": lane,
+            "terrain": "water" if self.config.is_water_lane(lane) else ("roof" if self.config.is_roof else "ground"),
             "danger": min(1.0, len(lane_zombies) * 0.25),
             "home_eta_ticks": home_eta_ticks,
             "lane_alerts": self._lane_alerts(
@@ -2444,6 +3249,8 @@ class GameEngine:
                 f"{self.state.plants[entity_id].plant_id}@{col}"
                 if entity_id in self.state.plants
                 else f"pending_imitator@{col}"
+                if entity_id in self.state.pending_imitators
+                else f"airdrop@{col}"
                 for (cell_lane, col), entity_id in sorted(self.state.grid.items())
                 if cell_lane == lane and entity_id is not None
             ],
@@ -2456,6 +3263,14 @@ class GameEngine:
                 }
                 for imitator in self.state.pending_imitators.values()
                 if imitator.lane == lane
+            ],
+            "airdrops": [
+                {
+                    "col": airdrop.col,
+                    "expires_in_ticks": max(0, airdrop.expires_tick - self.state.tick),
+                }
+                for airdrop in self.state.airdrops.values()
+                if airdrop.lane == lane
             ],
             "open_cells": [
                 col for col in self.config.cols_range() if self.state.grid[(lane, col)] is None
@@ -2521,8 +3336,8 @@ class GameEngine:
             "dancing": "舞王存活一段时间后会召唤伴舞到相邻行。",
             "backup_dancer": "伴舞僵尸血量较低，通常由舞王召唤出现。",
             "dolphin_rider": "首次遇到普通阻挡会跳过一格，未开奖模仿者也会被跳过，落地后降速。",
-            "snorkel": "潜水僵尸；当前场地层未细化水下隐藏，先按普通移动单位处理。",
-            "ducky_tube": "鸭子圈僵尸；当前无水路层，先作为普通推进单位处理。",
+            "snorkel": "潜水僵尸；水下隐藏层未细化，先按普通移动单位处理。",
+            "ducky_tube": "鸭子圈僵尸；水路单位，先作为普通推进单位处理。",
             "miner": "矿工僵尸；当前地下绕后未细化，先按较快特殊僵尸处理。",
             "bungee": "蹦极僵尸停留短时间后会偷走同一路附近植物并离场。",
             "ladder": "梯子僵尸血量较高；梯子放置状态未细化，当前先作为高血量单位。",

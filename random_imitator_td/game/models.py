@@ -45,6 +45,7 @@ class PendingImitator:
     planted_tick: int
     reveal_tick: int
     blocking: bool = True
+    status: str = "active"
 
 
 @dataclass
@@ -85,6 +86,16 @@ class BossEventInstance:
 
 
 @dataclass
+class AirdropInstance:
+    entity_id: str
+    lane: int
+    col: int
+    dropped_tick: int
+    expires_tick: int
+    status: str = "closed"
+
+
+@dataclass
 class GameState:
     tick: int
     sun: int
@@ -94,6 +105,7 @@ class GameState:
     pending_imitators: dict[str, PendingImitator]
     zombies: dict[str, ZombieInstance]
     boss_events: dict[str, BossEventInstance]
+    airdrops: dict[str, AirdropInstance]
     cooldowns: dict[str, int]
     lawnmowers: dict[int, bool]
     wave_state: dict[str, Any]
@@ -125,6 +137,7 @@ def initial_state(config: GameConfig | None = None, *, level: int = 1) -> GameSt
         pending_imitators={},
         zombies={},
         boss_events={},
+        airdrops={},
         cooldowns=cooldowns,
         lawnmowers={lane: True for lane in config.lanes_range()},
         wave_state={"completed": False},

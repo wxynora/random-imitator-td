@@ -29,6 +29,25 @@ class GameConfig:
     spawn_x: float = 10.0
     tick_seconds: float = 0.1
     is_day: bool = True
+    water_lanes: tuple[int, ...] = ()
+    fog_start_col: int | None = None
+    fog_reveal_radius: int = 2
+    is_roof: bool = False
+    is_endless: bool = False
+    enable_airdrops: bool = False
+    roof_tile_event_start_tick: int = 180
+    roof_tile_event_interval_ticks: int = 160
+    roof_tile_damage: int = 300
+    endless_wave_start_tick: int = 100
+    endless_wave_interval_ticks: int = 45
+    airdrop_start_tick: int = 125
+    airdrop_min_interval_ticks: int = 180
+    airdrop_max_interval_ticks: int = 260
+    airdrop_ttl_ticks: int = 300
+    airdrop_open_action_ticks: int = 1
+    max_active_airdrops: int = 1
+    airdrop_min_col: int = 2
+    airdrop_max_col: int = 7
     initial_sun: int = 150
     imitator_cost: int = 0
     coffee_bean_cost: int = 75
@@ -65,3 +84,9 @@ class GameConfig:
 
     def is_valid_cell(self, lane: int, col: int) -> bool:
         return self.is_valid_lane(lane) and self.is_valid_col(col)
+
+    def is_water_lane(self, lane: int) -> bool:
+        return lane in self.water_lanes
+
+    def is_fog_col(self, col: int) -> bool:
+        return self.fog_start_col is not None and col >= self.fog_start_col

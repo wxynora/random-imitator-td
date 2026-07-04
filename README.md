@@ -11,6 +11,14 @@ print(cmd("种 模仿者 3-4; 种 向日葵 2-3"))
 ```
 
 The first step of a new run is card-slot editing. The game will not start resolving the board until the player configures cards.
+Special endless mode starts with six imitators. Choose whether to enable chaos when starting it:
+
+```text
+new_game mode=特殊 chaos=off
+new_game mode=特殊 chaos=airdrop
+```
+
+`chaos=airdrop` adds airdrop boxes. An airdrop occupies a grid cell without blocking zombies; the player can open it, and zombies open it when passing through. It contains either a strong plant or a zombie.
 
 ```text
 提示: 模仿者越多，随机味越足。
@@ -48,8 +56,11 @@ help
 status
 look / 打开 / 继续
 new_game level=1 seed=demo
+new_game mode=特殊 chaos=off
+new_game mode=特殊 chaos=airdrop
 cards 模仿者 模仿者 模仿者 模仿者 向日葵 窝瓜
 种 模仿者 3-4; 种 向日葵 2-3
+开空投 3-5
 铲 3-4
 等待
 等待 200
